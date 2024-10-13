@@ -90,7 +90,7 @@ class DeepLabV3Backbone(Backbone):
         fpn_outputs = fpn_model(inputs)
 
         spatial_pyramid_pooling = SpatialPyramidPooling(
-            dilation_rates=dilation_rates
+            dilation_rates=dilation_rates, dropout=0.5
         )
         spatial_backbone_features = fpn_outputs[spatial_pyramid_pooling_key]
         spp_outputs = spatial_pyramid_pooling(spatial_backbone_features)
@@ -121,7 +121,7 @@ class DeepLabV3Backbone(Backbone):
         x = keras.layers.Conv2D(
             name="segmentation_head_conv",
             filters=256,
-            kernel_size=1,
+            kernel_size=3,
             padding="same",
             use_bias=False,
             data_format=data_format,
