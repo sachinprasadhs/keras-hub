@@ -7,8 +7,8 @@ from keras_hub.src.models.feature_pyramid_backbone import FeaturePyramidBackbone
 from keras_hub.src.utils.keras_utils import standardize_data_format
 
 
-@keras_hub_export("keras_hub.models.CSPNetBackbone")
-class CSPNetBackbone(FeaturePyramidBackbone):
+@keras_hub_export("keras_hub.models.CSPDarkNetBackbone")
+class CSPDarkNetBackbone(FeaturePyramidBackbone):
     """This class represents Keras Backbone of CSPNet model.
 
     This class implements a CSPNet backbone as described in
