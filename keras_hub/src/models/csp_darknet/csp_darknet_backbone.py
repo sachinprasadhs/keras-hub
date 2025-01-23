@@ -551,9 +551,9 @@ def create_csp_stem(
     assert stem_depth
     assert stride in (1, 2, 4)
     last_idx = stem_depth - 1
-    stem_stride = 1
 
     def apply(x):
+        stem_stride = 1
         for i, chs in enumerate(filters):
             conv_stride = (
                 2
