@@ -336,7 +336,7 @@ def cross_stage(
                 x = layers.Conv2D(
                     filters,
                     kernel_size=1,
-                    stride=1,
+                    strides=1,
                     use_bias=False,
                     groups=groups,
                     data_format=data_format,
@@ -350,7 +350,7 @@ def cross_stage(
                 x = layers.Conv2D(
                     down_chs,
                     kernel_size=3,
-                    stride=stride,
+                    strides=stride,
                     dilation=first_dilation,
                     use_bias=False,
                     groups=groups,
@@ -458,7 +458,7 @@ def cross_stage3(
                 x = layers.Conv2D(
                     filters,
                     kernel_size=1,
-                    stride=1,
+                    strides=1,
                     use_bias=False,
                     groups=groups,
                     data_format=data_format,
@@ -472,7 +472,7 @@ def cross_stage3(
                 x = layers.Conv2D(
                     down_chs,
                     kernel_size=3,
-                    stride=stride,
+                    strides=stride,
                     dilation=first_dilation,
                     use_bias=False,
                     groups=groups,
@@ -564,7 +564,7 @@ def create_csp_stem(
             x = layers.Conv2D(
                 chs,
                 kernel_size=kernel_size,
-                stride=conv_stride,
+                strides=conv_stride,
                 padding=padding if i == 0 else "",
                 use_bias=False,
                 data_format=data_format,
@@ -580,7 +580,7 @@ def create_csp_stem(
             assert stride > 2
             x = layers.MaxPooling2D(
                 pool_size=3,
-                stride=2,
+                strides=2,
                 padding=1,
                 data_format=None,
                 name="pool",
