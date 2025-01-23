@@ -541,7 +541,7 @@ def create_csp_stem(
     kernel_size=3,
     stride=2,
     pooling=None,
-    padding=None,
+    padding="valid",
     activation="relu",
     name=None,
 ):
@@ -565,7 +565,7 @@ def create_csp_stem(
                 chs,
                 kernel_size=kernel_size,
                 strides=conv_stride,
-                padding=padding if i == 0 else "",
+                # padding=padding if i == 0 else "",
                 use_bias=False,
                 data_format=data_format,
                 name=f"{name}_conv_{i + 1}",
