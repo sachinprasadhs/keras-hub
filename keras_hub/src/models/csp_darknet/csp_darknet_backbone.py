@@ -67,6 +67,7 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
         block_ratio,
         stage_type,
         block_type,
+        stem_activattion="relu",
         stem_pooling=None,
         avg_down=False,
         image_shape=(None, None, 3),
@@ -568,9 +569,9 @@ def create_csp_stem(
                 # padding=padding if i == 0 else "",
                 use_bias=False,
                 data_format=data_format,
-                name=f"{name}_conv_{i + 1}",
+                name=f"csp_stem_conv_{i}",
             )(x)
-            x = layers.BatchNormalization(axis=channel_axis, name=f"{name}_bn")(
+            x = layers.BatchNormalization(axis=channel_axis, name=f"csp_stem_bn_{i}")(
                 x
             )
             x = layers.Activation(activation)(x)
@@ -581,7 +582,7 @@ def create_csp_stem(
             x = layers.MaxPooling2D(
                 pool_size=3,
                 strides=2,
-                padding=1,
+                padding="valid",
                 data_format=None,
                 name="pool",
             )(x)
