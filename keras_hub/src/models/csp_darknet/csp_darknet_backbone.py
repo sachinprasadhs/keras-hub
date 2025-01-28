@@ -114,6 +114,7 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
             bottle_ratio=bottle_ratio,
             expand_ratio=expand_ratio,
             stride=stackwise_stride,
+            prev_channels=None,
             avg_down=avg_down,
             first_dilation=first_dilation,
             down_growth=down_growth,
