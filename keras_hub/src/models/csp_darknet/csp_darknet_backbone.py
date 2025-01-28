@@ -66,7 +66,7 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
         block_type,
         groups=1,
         stage_type=None,
-        drop_path_rate=0.,
+        drop_path_rate=0.0,
         activation="leaky_relu",
         block_dpr=None,
         output_stride=32,
@@ -238,7 +238,6 @@ def bottleneck_block(
         )(x)
         x = layers.Activation(
             activation,
-            negative_slope=negative_slope,
             name=f"{name}_bottleneck_block_activation_1",
         )(x)
 
@@ -257,7 +256,6 @@ def bottleneck_block(
         )(x)
         x = layers.Activation(
             activation,
-            negative_slope=negative_slope,
             name=f"{name}_bottleneck_block_activation_2",
         )(x)
 
@@ -273,14 +271,12 @@ def bottleneck_block(
         )(x)
         x = layers.Activation(
             activation,
-            negative_slope=negative_slope,
             name=f"{name}_bottleneck_block_activation_3",
         )(x)
 
         x = layers.add([x, shortcut])
         x = layers.Activation(
             activation,
-            negative_slope=negative_slope,
             name=f"{name}_bottleneck_block_activation_4",
         )(x)
         return x
@@ -318,7 +314,6 @@ def dark_block(
         )(x)
         x = layers.Activation(
             activation,
-            negative_slope=negative_slope,
             name=f"{name}_dark_block_activation_1",
         )(x)
 
@@ -337,7 +332,6 @@ def dark_block(
         )(x)
         x = layers.Activation(
             activation,
-            negative_slope=negative_slope,
             name=f"{name}_dark_block_activation_2",
         )(x)
 
@@ -380,7 +374,6 @@ def edge_block(
         )(x)
         x = layers.Activation(
             activation,
-            negative_slope=negative_slope,
             name=f"{name}_edge_block_activation_1",
         )(x)
 
@@ -396,7 +389,6 @@ def edge_block(
         )(x)
         x = layers.Activation(
             activation,
-            negative_slope=negative_slope,
             name=f"{name}_bottleneck_block_activation_2",
         )(x)
 
@@ -456,7 +448,6 @@ def cross_stage(
                 )(x)
                 x = layers.Activation(
                     activation,
-                    negative_slope=negative_slope,
                     name=f"{name}_cross_stage_activation_1",
                 )(x)
             else:
@@ -475,7 +466,6 @@ def cross_stage(
                 )(x)
                 x = layers.Activation(
                     activation,
-                    negative_slope=negative_slope,
                     name=f"{name}_cross_stage_activation_1",
                 )(x)
 
@@ -492,7 +482,6 @@ def cross_stage(
         if not cross_linear:
             x = layers.Activation(
                 activation,
-                negative_slope=negative_slope,
                 name=f"{name}_cross_stage_activation_2",
             )(x)
 
@@ -524,7 +513,6 @@ def cross_stage(
         )(xb)
         xb = layers.Activation(
             activation,
-            negative_slope=negative_slope,
             name=f"{name}_cross_stage_activation_3",
         )(xb)
 
@@ -543,7 +531,6 @@ def cross_stage(
         )(out)
         out = layers.Activation(
             activation,
-            negative_slope=negative_slope,
             name=f"{name}_cross_stage_activation_4",
         )(out)
         return out
@@ -603,7 +590,6 @@ def cross_stage3(
                 )(x)
                 x = layers.Activation(
                     activation,
-                    negative_slope=negative_slope,
                     name=f"{name}_cross_stage3_activation_1",
                 )(x)
             else:
@@ -622,7 +608,6 @@ def cross_stage3(
                 )(x)
                 x = layers.Activation(
                     activation,
-                    negative_slope=negative_slope,
                     name=f"{name}_cross_stage3_activation_1",
                 )(x)
 
@@ -639,7 +624,6 @@ def cross_stage3(
         if not cross_linear:
             x = layers.Activation(
                 activation,
-                negative_slope=negative_slope,
                 name=f"{name}_cross_stage3_activation_2",
             )(x)
 
@@ -674,7 +658,6 @@ def cross_stage3(
         )(out)
         out = layers.Activation(
             activation,
-            negative_slope=negative_slope,
             name=f"{name}_cross_stage3_activation_3",
         )(out)
         return out
@@ -728,7 +711,6 @@ def create_csp_stem(
             )(x)
             x = layers.Activation(
                 activation,
-                negative_slope=negative_slope,
                 name=f"csp_stem_activation_{i}",
             )(x)
             stem_stride *= conv_stride
