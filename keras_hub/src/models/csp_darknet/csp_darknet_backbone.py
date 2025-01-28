@@ -737,6 +737,7 @@ def create_csp_stages(
     channel_axis,
     stackwise_depth,
     reduction,
+    first_dilation,
     drop_path_rate,
     block_dpr,
     block_ratio,
