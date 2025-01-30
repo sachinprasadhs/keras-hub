@@ -66,9 +66,7 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
         block_type,
         groups=1,
         stage_type=None,
-        drop_path_rate=0.0,
         activation="leaky_relu",
-        block_dpr=None,
         output_stride=32,
         first_dilation=None,
         bottle_ratio=(1.0),
@@ -109,8 +107,6 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
             channel_axis=channel_axis,
             stackwise_depth=stackwise_depth,
             reduction=stem_feat_info,
-            drop_path_rate=drop_path_rate,
-            block_dpr=block_dpr,
             groups=groups,
             block_ratio=block_ratio,
             bottle_ratio=bottle_ratio,
@@ -128,7 +124,7 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
             name="csp_stage",
         )
 
-        super().__init__(inputs=image_input, outputs=stages, **kwargs)
+        super().__init__(inputs=image_input, outputs=stages, dtype=dtype, **kwargs)
 
         # === Config ===
         self.stem_filter = (stem_filter,)
@@ -139,11 +135,9 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
         self.stackwise_num_filters = (stackwise_num_filters,)
         self.stage_type = (stage_type,)
         self.block_type = (block_type,)
-        self.drop_path_rate = (drop_path_rate,)
         self.output_stride = (output_stride,)
         self.groups = (groups,)
         self.activation = (activation,)
-        self.block_dpr = (block_dpr,)
         self.first_dilation = (first_dilation,)
         self.bottle_ratio = (bottle_ratio,)
         self.block_ratio = (block_ratio,)
@@ -170,11 +164,9 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
                 "stackwise_num_filters": self.stackwise_num_filters,
                 "stage_type": self.stage_type,
                 "block_type": self.block_type,
-                "drop_path_rate": self.drop_path_rate,
                 "output_stride": self.output_stride,
                 "groups": self.groups,
                 "activation": self.activation,
-                "block_dpr": self.block_dpr,
                 "first_dilation": self.first_dilation,
                 "bottle_ratio": self.bottle_ratio,
                 "block_ratio": self.block_ratio,
@@ -509,7 +501,6 @@ def cross_stage(
     activation="relu",
     down_growth=False,
     cross_linear=False,
-    block_dpr=None,
     block_fn=bottleneck_block,
     dtype=None,
     name=None,
@@ -614,18 +605,17 @@ def cross_stage(
                     dtype=dtype,
                     name=f"{name}_cross_stage_activation_2",
                 )(x)
-
+        prev_filters = keras.ops.shape(x)[channel_axis]
         xs, xb = ops.split(
-            x, indices_or_sections=expand_chs // 2, axis=channel_axis
+            x, indices_or_sections=prev_filters//(expand_chs // 2), axis=channel_axis
         )
 
         for i in range(depth):
             xb = block_fn(
                 filters=block_channels,
-                dilation_rate=dilation,
+                dilation=dilation,
                 bottle_ratio=bottle_ratio,
                 groups=groups,
-                drop_path=block_dpr[i] if block_dpr is not None else 0.0,
                 activation="relu",
                 data_format=data_format,
                 channel_axis=channel_axis,
@@ -710,7 +700,6 @@ def cross_stage3(
     cross_linear,
     block_fn,
     groups,
-    block_dpr,
     name=None,
     dtype=None,
 ):
@@ -815,17 +804,17 @@ def cross_stage3(
                     name=f"{name}_cross_stage3_activation_2",
                 )(x)
 
+        prev_filters = keras.ops.shape(x)[channel_axis]
         x1, x2 = ops.split(
-            x, indices_or_sections=expand_chs // 2, axis=channel_axis
+            x, indices_or_sections=prev_filters//(expand_chs // 2), axis=channel_axis
         )
 
-        for i in range(len(depth)):
+        for i in range(depth):
             x1 = block_fn(
                 filters=block_filters,
-                dilation_rate=dilation,
+                dilation=dilation,
                 bottle_ratio=bottle_ratio,
                 groups=groups,
-                drop_path=block_dpr[i] if block_dpr is not None else 0.0,
                 activation=activation,
                 data_format=data_format,
                 channel_axis=channel_axis,
@@ -952,8 +941,6 @@ def create_csp_stages(
     stackwise_depth,
     reduction,
     first_dilation,
-    drop_path_rate,
-    block_dpr,
     block_ratio,
     bottle_ratio,
     expand_ratio,
@@ -973,16 +960,6 @@ def create_csp_stages(
         name = f"csp_stage_{keras.backend.get_uid('csp_stage')}"
 
     num_stages = len(stackwise_depth)
-    block_dpr = (
-        [None] * num_stages
-        if not drop_path_rate
-        else [
-            x.tolist()
-            for x in ops.linspace(
-                0, drop_path_rate, sum(stackwise_depth)
-            ).split(stackwise_depth)
-        ]
-    )
     dilation = 1
     net_stride = reduction
     stride = _pad_arg(stride, num_stages)
@@ -1028,7 +1005,6 @@ def create_csp_stages(
             activation=activation,
             down_growth=down_growth,
             cross_linear=cross_linear,
-            block_dpr=block_dpr,
             block_fn=block_fn,
             dtype=dtype,
             name=name,
