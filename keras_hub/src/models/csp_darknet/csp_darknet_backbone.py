@@ -81,6 +81,7 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
         cross_linear=False,
         image_shape=(None, None, 3),
         data_format=None,
+        dtype=None,
         **kwargs,
     ):
         # === Functional Model ===
@@ -98,6 +99,7 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
             pooling=stem_pooling,
             padding=stem_padding,
             activation=activation,
+            dtype=dtype,
         )(x)
 
         stages, pyramid_outputs = create_csp_stages(
@@ -114,7 +116,6 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
             bottle_ratio=bottle_ratio,
             expand_ratio=expand_ratio,
             stride=stackwise_stride,
-            prev_channels=None,
             avg_down=avg_down,
             first_dilation=first_dilation,
             down_growth=down_growth,
@@ -123,6 +124,7 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
             output_stride=output_stride,
             stage_type=stage_type,
             block_type=block_type,
+            dtype=dtype,
             name="csp_stage",
         )
 
@@ -198,7 +200,7 @@ def bottleneck_block(
     bottle_ratio=0.25,
     groups=1,
     activation="relu",
-    negative_slope=0.1,
+    dtype=None,
     name=None,
 ):
     """
@@ -232,15 +234,27 @@ def bottleneck_block(
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_bottleneck_conv_1",
         )(x)
         x = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_bottleneck_bn_1"
+            epsilon=1e-05,
+            axis=channel_axis,
+            dtype=dtype,
+            name=f"{name}_bottleneck_bn_1",
         )(x)
-        x = layers.Activation(
-            activation,
-            name=f"{name}_bottleneck_block_activation_1",
-        )(x)
+        if activation == "leaky_relu":
+            x = layers.LeakyReLU(
+                negative_slope=0.1,
+                dtype=dtype,
+                name=f"{name}_bottleneck_block_activation_1",
+            )(x)
+        else:
+            x = layers.Activation(
+                activation,
+                dtype=dtype,
+                name=f"{name}_bottleneck_block_activation_1",
+            )(x)
 
         x = layers.Conv2D(
             hidden_filters,
@@ -250,36 +264,68 @@ def bottleneck_block(
             padding="same",
             use_bias=False,
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_bottleneck_conv_2",
         )(x)
         x = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_bottleneck_bn_2"
+            epsilon=1e-05,
+            axis=channel_axis,
+            dtype=dtype,
+            name=f"{name}_bottleneck_bn_2",
         )(x)
-        x = layers.Activation(
-            activation,
-            name=f"{name}_bottleneck_block_activation_2",
-        )(x)
+        if activation == "leaky_relu":
+            x = layers.LeakyReLU(
+                negative_slope=0.1,
+                dtype=dtype,
+                name=f"{name}_bottleneck_block_activation_2",
+            )(x)
+        else:
+            x = layers.Activation(
+                activation,
+                dtype=dtype,
+                name=f"{name}_bottleneck_block_activation_2",
+            )(x)
 
         x = layers.Conv2D(
             filters,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_bottleneck_conv_3",
         )(x)
         x = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_bottleneck_bn_3"
+            epsilon=1e-05,
+            axis=channel_axis,
+            dtype=dtype,
+            name=f"{name}_bottleneck_bn_3",
         )(x)
-        x = layers.Activation(
-            activation,
-            name=f"{name}_bottleneck_block_activation_3",
-        )(x)
+        if activation == "leaky_relu":
+            x = layers.LeakyReLU(
+                negative_slope=0.1,
+                dtype=dtype,
+                name=f"{name}_bottleneck_block_activation_3",
+            )(x)
+        else:
+            x = layers.Activation(
+                activation,
+                dtype=dtype,
+                name=f"{name}_bottleneck_block_activation_3",
+            )(x)
 
         x = layers.add([x, shortcut])
-        x = layers.Activation(
-            activation,
-            name=f"{name}_bottleneck_block_activation_4",
-        )(x)
+        if activation == "leaky_relu":
+            x = layers.LeakyReLU(
+                negative_slope=0.1,
+                dtype=dtype,
+                name=f"{name}_bottleneck_block_activation_4",
+            )(x)
+        else:
+            x = layers.Activation(
+                activation,
+                dtype=dtype,
+                name=f"{name}_bottleneck_block_activation_4",
+            )(x)
         return x
 
     return apply
@@ -293,7 +339,7 @@ def dark_block(
     bottle_ratio,
     groups,
     activation,
-    negative_slope=0.1,
+    dtype=None,
     name=None,
 ):
     if name is None:
@@ -308,15 +354,27 @@ def dark_block(
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_dark_conv_1",
         )(x)
         x = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_dark_bn_1"
+            epsilon=1e-05,
+            axis=channel_axis,
+            dtype=dtype,
+            name=f"{name}_dark_bn_1",
         )(x)
-        x = layers.Activation(
-            activation,
-            name=f"{name}_dark_block_activation_1",
-        )(x)
+        if activation == "leaky_relu":
+            x = layers.LeakyReLU(
+                negative_slope=0.1,
+                dtype=dtype,
+                name=f"{name}_dark_block_activation_1",
+            )(x)
+        else:
+            x = layers.Activation(
+                activation,
+                dtype=dtype,
+                name=f"{name}_dark_block_activation_1",
+            )(x)
 
         x = layers.Conv2D(
             filters,
@@ -326,15 +384,27 @@ def dark_block(
             padding="same",
             use_bias=False,
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_dark_conv_2",
         )(x)
         x = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_dark_bn_2"
+            epsilon=1e-05,
+            axis=channel_axis,
+            dtype=dtype,
+            name=f"{name}_dark_bn_2",
         )(x)
-        x = layers.Activation(
-            activation,
-            name=f"{name}_dark_block_activation_2",
-        )(x)
+        if activation == "leaky_relu":
+            x = layers.LeakyReLU(
+                negative_slope=0.1,
+                dtype=dtype,
+                name=f"{name}_dark_block_activation_2",
+            )(x)
+        else:
+            x = layers.Activation(
+                activation,
+                dtype=dtype,
+                name=f"{name}_dark_block_activation_2",
+            )(x)
 
         x = layers.add([x, shortcut])
         return x
@@ -350,7 +420,7 @@ def edge_block(
     bottle_ratio=0.5,
     groups=1,
     activation="relu",
-    negative_slope=0.1,
+    dtype=None,
     name=None,
 ):
     if name is None:
@@ -368,30 +438,54 @@ def edge_block(
             groups=groups,
             padding="same",
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_edge_conv_1",
         )(x)
         x = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_edge_bn_1"
+            epsilon=1e-05,
+            axis=channel_axis,
+            dtype=dtype,
+            name=f"{name}_edge_bn_1",
         )(x)
-        x = layers.Activation(
-            activation,
-            name=f"{name}_edge_block_activation_1",
-        )(x)
+        if activation == "leaky_relu":
+            x = layers.LeakyReLU(
+                negative_slope=0.1,
+                dtype=dtype,
+                name=f"{name}_edge_block_activation_1",
+            )(x)
+        else:
+            x = layers.Activation(
+                activation,
+                dtype=dtype,
+                name=f"{name}_edge_block_activation_1",
+            )(x)
 
         x = layers.Conv2D(
             filters,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_edge_conv_2",
         )(x)
         x = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_edge_bn_2"
+            epsilon=1e-05,
+            axis=channel_axis,
+            dtype=dtype,
+            name=f"{name}_edge_bn_2",
         )(x)
-        x = layers.Activation(
-            activation,
-            name=f"{name}_bottleneck_block_activation_2",
-        )(x)
+        if activation == "leaky_relu":
+            x = layers.LeakyReLU(
+                negative_slope=0.1,
+                dtype=dtype,
+                name=f"{name}_bottleneck_block_activation_2",
+            )(x)
+        else:
+            x = layers.Activation(
+                activation,
+                dtype=dtype,
+                name=f"{name}_bottleneck_block_activation_2",
+            )(x)
 
         x = layers.add([x, shortcut])
         return x
@@ -402,7 +496,6 @@ def edge_block(
 def cross_stage(
     filters,
     stride,
-    prev_channels,
     dilation,
     depth,
     data_format,
@@ -414,11 +507,11 @@ def cross_stage(
     first_dilation=None,
     avg_down=False,
     activation="relu",
-    negative_slope=0.1,
     down_growth=False,
     cross_linear=False,
     block_dpr=None,
     block_fn=bottleneck_block,
+    dtype=None,
     name=None,
 ):
     if name is None:
@@ -427,14 +520,17 @@ def cross_stage(
     first_dilation = first_dilation or dilation
 
     def apply(x):
-        down_chs = filters if down_growth else prev_channels
+        prev_filters = keras.ops.shape(x)[channel_axis]
+        down_chs = filters if down_growth else prev_filters
         expand_chs = int(round(filters * expand_ratio))
         block_channels = int(round(filters * block_ratio))
 
         if stride != 1 or first_dilation != dilation:
             if avg_down:
                 if stride == 2:
-                    x = layers.AveragePooling2D(2, name=f"{name}_avg_pool")(x)
+                    x = layers.AveragePooling2D(
+                        2, dtype=dtype, name=f"{name}_avg_pool"
+                    )(x)
                 x = layers.Conv2D(
                     filters,
                     kernel_size=1,
@@ -442,15 +538,27 @@ def cross_stage(
                     use_bias=False,
                     groups=groups,
                     data_format=data_format,
+                    dtype=dtype,
                     name=f"{name}_conv_down",
                 )(x)
                 x = layers.BatchNormalization(
-                    epsilon=1e-05, axis=channel_axis, name=f"{name}_bn"
+                    epsilon=1e-05,
+                    axis=channel_axis,
+                    dtype=dtype,
+                    name=f"{name}_bn",
                 )(x)
-                x = layers.Activation(
-                    activation,
-                    name=f"{name}_cross_stage_activation_1",
-                )(x)
+                if activation == "leaky_relu":
+                    x = layers.LeakyReLU(
+                        negative_slope=0.1,
+                        dtype=dtype,
+                        name=f"{name}_cross_stage_activation_1",
+                    )(x)
+                else:
+                    x = layers.Activation(
+                        activation,
+                        dtype=dtype,
+                        name=f"{name}_cross_stage_activation_1",
+                    )(x)
             else:
                 x = layers.Conv2D(
                     down_chs,
@@ -460,31 +568,52 @@ def cross_stage(
                     use_bias=False,
                     groups=groups,
                     data_format=data_format,
+                    dtype=dtype,
                     name=f"{name}_conv_down",
                 )(x)
                 x = layers.BatchNormalization(
-                    epsilon=1e-05, axis=channel_axis, name=f"{name}_bn"
+                    epsilon=1e-05,
+                    axis=channel_axis,
+                    dtype=dtype,
+                    name=f"{name}_bn",
                 )(x)
-                x = layers.Activation(
-                    activation,
-                    name=f"{name}_cross_stage_activation_1",
-                )(x)
+                if activation == "leaky_relu":
+                    x = layers.LeakyReLU(
+                        negative_slope=0.1,
+                        dtype=dtype,
+                        name=f"{name}_cross_stage_activation_1",
+                    )(x)
+                else:
+                    x = layers.Activation(
+                        activation,
+                        dtype=dtype,
+                        name=f"{name}_cross_stage_activation_1",
+                    )(x)
 
         x = layers.Conv2D(
             expand_chs,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_conv_exp",
         )(x)
         x = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_bn"
+            epsilon=1e-05, axis=channel_axis, dtype=dtype, name=f"{name}_bn"
         )(x)
         if not cross_linear:
-            x = layers.Activation(
-                activation,
-                name=f"{name}_cross_stage_activation_2",
-            )(x)
+            if activation == "leaky_relu":
+                x = layers.LeakyReLU(
+                    negative_slope=0.1,
+                    dtype=dtype,
+                    name=f"{name}_cross_stage_activation_2",
+                )(x)
+            else:
+                x = layers.Activation(
+                    activation,
+                    dtype=dtype,
+                    name=f"{name}_cross_stage_activation_2",
+                )(x)
 
         xs, xb = ops.split(
             x, indices_or_sections=expand_chs // 2, axis=channel_axis
@@ -500,6 +629,7 @@ def cross_stage(
                 activation="relu",
                 data_format=data_format,
                 channel_axis=channel_axis,
+                dtype=dtype,
             )(xb)
 
         xb = layers.Conv2D(
@@ -507,15 +637,27 @@ def cross_stage(
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_conv_transition_b",
         )(xb)
         xb = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_transition_b_bn"
+            epsilon=1e-05,
+            axis=channel_axis,
+            dtype=dtype,
+            name=f"{name}_transition_b_bn",
         )(xb)
-        xb = layers.Activation(
-            activation,
-            name=f"{name}_cross_stage_activation_3",
-        )(xb)
+        if activation == "leaky_relu":
+            xb = layers.LeakyReLU(
+                negative_slope=0.1,
+                dtype=dtype,
+                name=f"{name}_cross_stage_activation_3",
+            )(xb)
+        else:
+            xb = layers.Activation(
+                activation,
+                dtype=dtype,
+                name=f"{name}_cross_stage_activation_3",
+            )(xb)
 
         out = layers.Concatenate(
             axis=channel_axis, name=f"{name}_conv_transition"
@@ -525,15 +667,27 @@ def cross_stage(
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_conv_transition",
         )(out)
         out = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_transition_bn"
+            epsilon=1e-05,
+            axis=channel_axis,
+            dtype=dtype,
+            name=f"{name}_transition_bn",
         )(out)
-        out = layers.Activation(
-            activation,
-            name=f"{name}_cross_stage_activation_4",
-        )(out)
+        if activation == "leaky_relu":
+            out = layers.LeakyReLU(
+                negative_slope=0.1,
+                dtype=dtype,
+                name=f"{name}_cross_stage_activation_4",
+            )(out)
+        else:
+            out = layers.Activation(
+                activation,
+                dtype=dtype,
+                name=f"{name}_cross_stage_activation_4",
+            )(out)
         return out
 
     return apply
@@ -544,7 +698,6 @@ def cross_stage3(
     channel_axis,
     filters,
     stride,
-    prev_channels,
     dilation,
     depth,
     block_ratio,
@@ -559,7 +712,7 @@ def cross_stage3(
     groups,
     block_dpr,
     name=None,
-    negative_slope=0.1,
+    dtype=None,
 ):
     if name is None:
         name = f"cross_stage3_{keras.backend.get_uid('cross_stage3')}"
@@ -567,7 +720,8 @@ def cross_stage3(
     first_dilation = first_dilation or dilation
 
     def apply(x):
-        down_chs = filters if down_growth else prev_channels
+        prev_filters = keras.ops.shape(x)[channel_axis]
+        down_chs = filters if down_growth else prev_filters
         expand_chs = int(round(filters * expand_ratio))
         block_filters = int(round(filters * block_ratio))
 
@@ -575,7 +729,7 @@ def cross_stage3(
             if avg_down:
                 if stride == 2:
                     x = layers.AveragePooling2D(
-                        2, name=f"{name}_cross_stage3_avg_pool"
+                        2, dtype=dtype, name=f"{name}_cross_stage3_avg_pool"
                     )(x)
                 x = layers.Conv2D(
                     filters,
@@ -584,15 +738,27 @@ def cross_stage3(
                     use_bias=False,
                     groups=groups,
                     data_format=data_format,
+                    dtype=dtype,
                     name=f"{name}_cross_stage3_conv_down",
                 )(x)
                 x = layers.BatchNormalization(
-                    epsilon=1e-05, axis=channel_axis, name=f"{name}_bn"
+                    epsilon=1e-05,
+                    axis=channel_axis,
+                    dtype=dtype,
+                    name=f"{name}_bn",
                 )(x)
-                x = layers.Activation(
-                    activation,
-                    name=f"{name}_cross_stage3_activation_1",
-                )(x)
+                if activation == "leaky_relu":
+                    x = layers.LeakyReLU(
+                        negative_slope=0.1,
+                        dtype=dtype,
+                        name=f"{name}_cross_stage3_activation_1",
+                    )(x)
+                else:
+                    x = layers.Activation(
+                        activation,
+                        dtype=dtype,
+                        name=f"{name}_cross_stage3_activation_1",
+                    )(x)
             else:
                 x = layers.Conv2D(
                     down_chs,
@@ -602,31 +768,52 @@ def cross_stage3(
                     use_bias=False,
                     groups=groups,
                     data_format=data_format,
+                    dtype=dtype,
                     name=f"{name}_conv_down",
                 )(x)
                 x = layers.BatchNormalization(
-                    epsilon=1e-05, axis=channel_axis, name=f"{name}_bn"
+                    epsilon=1e-05,
+                    axis=channel_axis,
+                    dtype=dtype,
+                    name=f"{name}_bn",
                 )(x)
-                x = layers.Activation(
-                    activation,
-                    name=f"{name}_cross_stage3_activation_1",
-                )(x)
+                if activation == "leaky_relu":
+                    x = layers.LeakyReLU(
+                        negative_slope=0.1,
+                        dtype=dtype,
+                        name=f"{name}_cross_stage3_activation_1",
+                    )(x)
+                else:
+                    x = layers.Activation(
+                        activation,
+                        dtype=dtype,
+                        name=f"{name}_cross_stage3_activation_1",
+                    )(x)
 
         x = layers.Conv2D(
             expand_chs,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_conv_exp",
         )(x)
         x = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_bn"
+            epsilon=1e-05, axis=channel_axis, dtype=dtype, name=f"{name}_bn"
         )(x)
         if not cross_linear:
-            x = layers.Activation(
-                activation,
-                name=f"{name}_cross_stage3_activation_2",
-            )(x)
+            if activation == "leaky_relu":
+                x = layers.LeakyReLU(
+                    negative_slope=0.1,
+                    dtype=dtype,
+                    name=f"{name}_cross_stage3_activation_2",
+                )(x)
+            else:
+                x = layers.Activation(
+                    activation,
+                    dtype=dtype,
+                    name=f"{name}_cross_stage3_activation_2",
+                )(x)
 
         x1, x2 = ops.split(
             x, indices_or_sections=expand_chs // 2, axis=channel_axis
@@ -642,25 +829,38 @@ def cross_stage3(
                 activation=activation,
                 data_format=data_format,
                 channel_axis=channel_axis,
+                dtype=dtype,
             )(x1)
 
         out = layers.Concatenate(
-            axis=channel_axis, name=f"{name}_conv_transition"
+            axis=channel_axis, dtype=dtype, name=f"{name}_conv_transition"
         )([x1, x2])
         out = layers.Conv2D(
             expand_chs // 2,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
+            dtype=dtype,
             name=f"{name}_conv_transition",
         )(out)
         out = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, name=f"{name}_transition_bn"
+            epsilon=1e-05,
+            axis=channel_axis,
+            dtype=dtype,
+            name=f"{name}_transition_bn",
         )(out)
-        out = layers.Activation(
-            activation,
-            name=f"{name}_cross_stage3_activation_3",
-        )(out)
+        if activation == "leaky_relu":
+            out = layers.LeakyReLU(
+                negative_slope=0.1,
+                dtype=dtype,
+                name=f"{name}_cross_stage3_activation_3",
+            )(out)
+        else:
+            out = layers.Activation(
+                activation,
+                dtype=dtype,
+                name=f"{name}_cross_stage3_activation_3",
+            )(out)
         return out
 
     return apply
@@ -680,7 +880,7 @@ def create_csp_stem(
     kernel_size=3,
     stride=2,
     pooling=None,
-    negative_slope=0.1,
+    dtype=None,
 ):
     if not isinstance(filters, (tuple, list)):
         filters = [filters]
@@ -705,15 +905,27 @@ def create_csp_stem(
                 padding=padding if i == 0 else "valid",
                 use_bias=False,
                 data_format=data_format,
+                dtype=dtype,
                 name=f"csp_stem_conv_{i}",
             )(x)
             x = layers.BatchNormalization(
-                epsilon=1e-05, axis=channel_axis, name=f"csp_stem_bn_{i}"
+                epsilon=1e-05,
+                axis=channel_axis,
+                dtype=dtype,
+                name=f"csp_stem_bn_{i}",
             )(x)
-            x = layers.Activation(
-                activation,
-                name=f"csp_stem_activation_{i}",
-            )(x)
+            if activation == "leaky_relu":
+                x = layers.LeakyReLU(
+                    negative_slope=0.1,
+                    dtype=dtype,
+                    name=f"csp_stem_activation_{i}",
+                )(x)
+            else:
+                x = layers.Activation(
+                    activation,
+                    dtype=dtype,
+                    name=f"csp_stem_activation_{i}",
+                )(x)
             stem_stride *= conv_stride
 
         if pooling == "max":
@@ -722,7 +934,8 @@ def create_csp_stem(
                 pool_size=3,
                 strides=2,
                 padding="same",
-                data_format=None,
+                data_format=data_format,
+                dtype=dtype,
                 name="csp_stem_pool",
             )(x)
             stem_stride *= 2
@@ -753,6 +966,7 @@ def create_csp_stages(
     output_stride,
     stage_type,
     block_type,
+    dtype,
     name,
 ):
     if name is None:
@@ -816,6 +1030,7 @@ def create_csp_stages(
             cross_linear=cross_linear,
             block_dpr=block_dpr,
             block_fn=block_fn,
+            dtype=dtype,
             name=name,
         )(stages)
         pyramid_outputs[f"P{block_idx} + 2"] = stages
