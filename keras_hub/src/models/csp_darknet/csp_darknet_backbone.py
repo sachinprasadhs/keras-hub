@@ -230,7 +230,7 @@ def bottleneck_block(
     def apply(x):
         shortcut = x
         x = layers.Conv2D(
-            hidden_filters,
+            filters=hidden_filters,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
@@ -257,9 +257,9 @@ def bottleneck_block(
             )(x)
 
         x = layers.Conv2D(
-            hidden_filters,
+            filters=hidden_filters,
             kernel_size=3,
-            dilation=dilation,
+            dilation_rate=dilation,
             groups=groups,
             padding="same",
             use_bias=False,
@@ -287,7 +287,7 @@ def bottleneck_block(
             )(x)
 
         x = layers.Conv2D(
-            filters,
+            filters=filters,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
@@ -350,7 +350,7 @@ def dark_block(
     def apply(x):
         shortcut = x
         x = layers.Conv2D(
-            hidden_filters,
+            filters=hidden_filters,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
@@ -377,9 +377,9 @@ def dark_block(
             )(x)
 
         x = layers.Conv2D(
-            filters,
+            filters=filters,
             kernel_size=3,
-            dilation=dilation,
+            dilation_rate=dilation,
             groups=groups,
             padding="same",
             use_bias=False,
@@ -431,10 +431,10 @@ def edge_block(
     def apply(x):
         shortcut = x
         x = layers.Conv2D(
-            hidden_filters,
+            filters=hidden_filters,
             kernel_size=3,
             use_bias=False,
-            dilation=dilation,
+            dilation_rate=dilation,
             groups=groups,
             padding="same",
             data_format=data_format,
@@ -461,7 +461,7 @@ def edge_block(
             )(x)
 
         x = layers.Conv2D(
-            filters,
+            filters=filters,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
@@ -532,7 +532,7 @@ def cross_stage(
                         2, dtype=dtype, name=f"{name}_avg_pool"
                     )(x)
                 x = layers.Conv2D(
-                    filters,
+                    filters=filters,
                     kernel_size=1,
                     strides=1,
                     use_bias=False,
@@ -561,10 +561,10 @@ def cross_stage(
                     )(x)
             else:
                 x = layers.Conv2D(
-                    down_chs,
+                    filters=down_chs,
                     kernel_size=3,
                     strides=stride,
-                    dilation=first_dilation,
+                    dilation_rate=first_dilation,
                     use_bias=False,
                     groups=groups,
                     data_format=data_format,
@@ -591,7 +591,7 @@ def cross_stage(
                     )(x)
 
         x = layers.Conv2D(
-            expand_chs,
+            filters=expand_chs,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
@@ -622,7 +622,7 @@ def cross_stage(
         for i in range(depth):
             xb = block_fn(
                 filters=block_channels,
-                dilation=dilation,
+                dilation_rate=dilation,
                 bottle_ratio=bottle_ratio,
                 groups=groups,
                 drop_path=block_dpr[i] if block_dpr is not None else 0.0,
@@ -633,7 +633,7 @@ def cross_stage(
             )(xb)
 
         xb = layers.Conv2D(
-            expand_chs // 2,
+            filters=expand_chs // 2,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
@@ -663,7 +663,7 @@ def cross_stage(
             axis=channel_axis, name=f"{name}_conv_transition"
         )([xs, xb])
         out = layers.Conv2D(
-            filters,
+            filters=filters,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
@@ -732,7 +732,7 @@ def cross_stage3(
                         2, dtype=dtype, name=f"{name}_cross_stage3_avg_pool"
                     )(x)
                 x = layers.Conv2D(
-                    filters,
+                    filters=filters,
                     kernel_size=1,
                     strides=1,
                     use_bias=False,
@@ -761,10 +761,10 @@ def cross_stage3(
                     )(x)
             else:
                 x = layers.Conv2D(
-                    down_chs,
+                    filters=down_chs,
                     kernel_size=3,
                     strides=stride,
-                    dilation=first_dilation,
+                    dilation_rate=first_dilation,
                     use_bias=False,
                     groups=groups,
                     data_format=data_format,
@@ -791,7 +791,7 @@ def cross_stage3(
                     )(x)
 
         x = layers.Conv2D(
-            expand_chs,
+            filters=expand_chs,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
@@ -822,7 +822,7 @@ def cross_stage3(
         for i in range(len(depth)):
             x1 = block_fn(
                 filters=block_filters,
-                dilation=dilation,
+                dilation_rate=dilation,
                 bottle_ratio=bottle_ratio,
                 groups=groups,
                 drop_path=block_dpr[i] if block_dpr is not None else 0.0,
@@ -836,7 +836,7 @@ def cross_stage3(
             axis=channel_axis, dtype=dtype, name=f"{name}_conv_transition"
         )([x1, x2])
         out = layers.Conv2D(
-            expand_chs // 2,
+            filters=expand_chs // 2,
             kernel_size=1,
             use_bias=False,
             data_format=data_format,
@@ -899,7 +899,7 @@ def create_csp_stem(
                 else 1
             )
             x = layers.Conv2D(
-                chs,
+                filters=chs,
                 kernel_size=kernel_size,
                 strides=conv_stride,
                 padding=padding if i == 0 else "valid",
