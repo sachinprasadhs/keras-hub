@@ -824,7 +824,7 @@ def cross_stage3(
             )(x1)
 
         out = layers.Concatenate(
-            axis=channel_axis, dtype=dtype, name=f"{name}_conv_transition"
+            axis=channel_axis, dtype=dtype, name=f"{name}_conv_transition_concat"
         )([x1, x2])
         out = layers.Conv2D(
             filters=expand_chs // 2,
