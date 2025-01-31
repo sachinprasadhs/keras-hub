@@ -984,10 +984,10 @@ def create_csp_stages(
     stages = inputs
     pyramid_outputs = {}
     for block_idx, _ in enumerate(stackwise_depth):
-        if net_stride >= output_stride and stride > 1:
-            dilation *= stride
+        if net_stride >= output_stride and stride[block_idx] > 1:
+            dilation *= stride[block_idx]
             stride = 1
-        net_stride *= stride
+        net_stride *= stride[block_idx]
         first_dilation = 1 if dilation in (1, 2) else 2
         stages = stage_fn(
             data_format,
