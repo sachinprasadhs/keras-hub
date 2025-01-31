@@ -530,13 +530,13 @@ def cross_stage(
                     groups=groups,
                     data_format=data_format,
                     dtype=dtype,
-                    name=f"{name}_conv_down",
+                    name=f"{name}_cross_stage_conv_down_1",
                 )(x)
                 x = layers.BatchNormalization(
                     epsilon=1e-05,
                     axis=channel_axis,
                     dtype=dtype,
-                    name=f"{name}_bn",
+                    name=f"{name}_bn_1",
                 )(x)
                 if activation == "leaky_relu":
                     x = layers.LeakyReLU(
@@ -560,13 +560,13 @@ def cross_stage(
                     groups=groups,
                     data_format=data_format,
                     dtype=dtype,
-                    name=f"{name}_conv_down",
+                    name=f"{name}_cross_stage3_conv_down_1",
                 )(x)
                 x = layers.BatchNormalization(
                     epsilon=1e-05,
                     axis=channel_axis,
                     dtype=dtype,
-                    name=f"{name}_bn",
+                    name=f"{name}_bn_1",
                 )(x)
                 if activation == "leaky_relu":
                     x = layers.LeakyReLU(
@@ -590,7 +590,7 @@ def cross_stage(
             name=f"{name}_conv_exp",
         )(x)
         x = layers.BatchNormalization(
-            epsilon=1e-05, axis=channel_axis, dtype=dtype, name=f"{name}_bn"
+            epsilon=1e-05, axis=channel_axis, dtype=dtype, name=f"{name}_bn_2"
         )(x)
         if not cross_linear:
             if activation == "leaky_relu":
@@ -620,6 +620,7 @@ def cross_stage(
                 data_format=data_format,
                 channel_axis=channel_axis,
                 dtype=dtype,
+                name=f"block_{i}_{name}",
             )(xb)
 
         xb = layers.Conv2D(
@@ -650,7 +651,7 @@ def cross_stage(
             )(xb)
 
         out = layers.Concatenate(
-            axis=channel_axis, name=f"{name}_conv_transition"
+            axis=channel_axis, name=f"{name}_conv_transition_concat"
         )([xs, xb])
         out = layers.Conv2D(
             filters=filters,
@@ -728,13 +729,13 @@ def cross_stage3(
                     groups=groups,
                     data_format=data_format,
                     dtype=dtype,
-                    name=f"{name}_cross_stage3_conv_down",
+                    name=f"{name}_cross_stage3_conv_down_1",
                 )(x)
                 x = layers.BatchNormalization(
                     epsilon=1e-05,
                     axis=channel_axis,
                     dtype=dtype,
-                    name=f"{name}_bn",
+                    name=f"{name}_bn_1",
                 )(x)
                 if activation == "leaky_relu":
                     x = layers.LeakyReLU(
@@ -758,13 +759,13 @@ def cross_stage3(
                     groups=groups,
                     data_format=data_format,
                     dtype=dtype,
-                    name=f"{name}_conv_down",
+                    name=f"{name}_cross_stage3_conv_down_2",
                 )(x)
                 x = layers.BatchNormalization(
                     epsilon=1e-05,
                     axis=channel_axis,
                     dtype=dtype,
-                    name=f"{name}_bn",
+                    name=f"{name}_bn_2",
                 )(x)
                 if activation == "leaky_relu":
                     x = layers.LeakyReLU(
@@ -819,6 +820,7 @@ def cross_stage3(
                 data_format=data_format,
                 channel_axis=channel_axis,
                 dtype=dtype,
+                name=f"block_{i}_{name}",
             )(x1)
 
         out = layers.Concatenate(
@@ -983,22 +985,22 @@ def create_csp_stages(
 
     stages = inputs
     pyramid_outputs = {}
-    for block_idx, _ in enumerate(stackwise_depth):
-        if net_stride >= output_stride and stride[block_idx] > 1:
-            dilation *= stride[block_idx]
+    for stage_idx, _ in enumerate(stackwise_depth):
+        if net_stride >= output_stride and stride[stage_idx] > 1:
+            dilation *= stride[stage_idx]
             stride = 1
-        net_stride *= stride[block_idx]
+        net_stride *= stride[stage_idx]
         first_dilation = 1 if dilation in (1, 2) else 2
         stages = stage_fn(
             data_format,
             channel_axis,
-            filters=filters[block_idx],
-            depth=stackwise_depth[block_idx],
-            stride=stride[block_idx],
+            filters=filters[stage_idx],
+            depth=stackwise_depth[stage_idx],
+            stride=stride[stage_idx],
             dilation=dilation,
-            block_ratio=block_ratio[block_idx],
-            bottle_ratio=bottle_ratio[block_idx],
-            expand_ratio=expand_ratio[block_idx],
+            block_ratio=block_ratio[stage_idx],
+            bottle_ratio=bottle_ratio[stage_idx],
+            expand_ratio=expand_ratio[stage_idx],
             groups=groups,
             first_dilation=first_dilation,
             avg_down=avg_down,
@@ -1007,9 +1009,9 @@ def create_csp_stages(
             cross_linear=cross_linear,
             block_fn=block_fn,
             dtype=dtype,
-            name=name,
+            name=f"stage_{stage_idx}",
         )(stages)
-        pyramid_outputs[f"P{block_idx} + 2"] = stages
+        pyramid_outputs[f"P{stage_idx} + 2"] = stages
     return stages, pyramid_outputs
 
 
