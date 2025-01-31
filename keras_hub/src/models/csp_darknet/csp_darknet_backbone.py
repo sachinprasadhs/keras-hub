@@ -82,10 +82,12 @@ class CSPDarkNetBackbone(FeaturePyramidBackbone):
         dtype=None,
         **kwargs,
     ):
-        # === Functional Model ===
+        assert stage_type in ('dark', 'csp', 'cs3')
+        assert block_type in ('dark', 'edge', 'bottle')
         data_format = standardize_data_format(data_format)
         channel_axis = -1 if data_format == "channels_last" else 1
 
+        # === Functional Model ===
         image_input = layers.Input(shape=image_shape)
         x = image_input  # Intermediate result.
         stem, stem_feat_info = create_csp_stem(
@@ -237,7 +239,7 @@ def bottleneck_block(
         )(x)
         if activation == "leaky_relu":
             x = layers.LeakyReLU(
-                negative_slope=0.1,
+                negative_slope=0.01,
                 dtype=dtype,
                 name=f"{name}_bottleneck_block_activation_1",
             )(x)
@@ -267,7 +269,7 @@ def bottleneck_block(
         )(x)
         if activation == "leaky_relu":
             x = layers.LeakyReLU(
-                negative_slope=0.1,
+                negative_slope=0.01,
                 dtype=dtype,
                 name=f"{name}_bottleneck_block_activation_2",
             )(x)
@@ -294,7 +296,7 @@ def bottleneck_block(
         )(x)
         if activation == "leaky_relu":
             x = layers.LeakyReLU(
-                negative_slope=0.1,
+                negative_slope=0.01,
                 dtype=dtype,
                 name=f"{name}_bottleneck_block_activation_3",
             )(x)
@@ -305,10 +307,10 @@ def bottleneck_block(
                 name=f"{name}_bottleneck_block_activation_3",
             )(x)
 
-        x = layers.add([x, shortcut])
+        x = layers.add([x, shortcut], name=f"{name}_bottleneck_block_add")
         if activation == "leaky_relu":
             x = layers.LeakyReLU(
-                negative_slope=0.1,
+                negative_slope=0.01,
                 dtype=dtype,
                 name=f"{name}_bottleneck_block_activation_4",
             )(x)
@@ -357,7 +359,7 @@ def dark_block(
         )(x)
         if activation == "leaky_relu":
             x = layers.LeakyReLU(
-                negative_slope=0.1,
+                negative_slope=0.01,
                 dtype=dtype,
                 name=f"{name}_dark_block_activation_1",
             )(x)
@@ -387,7 +389,7 @@ def dark_block(
         )(x)
         if activation == "leaky_relu":
             x = layers.LeakyReLU(
-                negative_slope=0.1,
+                negative_slope=0.01,
                 dtype=dtype,
                 name=f"{name}_dark_block_activation_2",
             )(x)
@@ -398,7 +400,7 @@ def dark_block(
                 name=f"{name}_dark_block_activation_2",
             )(x)
 
-        x = layers.add([x, shortcut])
+        x = layers.add([x, shortcut], name=f"{name}_dark_block_add")
         return x
 
     return apply
@@ -441,7 +443,7 @@ def edge_block(
         )(x)
         if activation == "leaky_relu":
             x = layers.LeakyReLU(
-                negative_slope=0.1,
+                negative_slope=0.01,
                 dtype=dtype,
                 name=f"{name}_edge_block_activation_1",
             )(x)
@@ -468,7 +470,7 @@ def edge_block(
         )(x)
         if activation == "leaky_relu":
             x = layers.LeakyReLU(
-                negative_slope=0.1,
+                negative_slope=0.01,
                 dtype=dtype,
                 name=f"{name}_bottleneck_block_activation_2",
             )(x)
@@ -479,7 +481,7 @@ def edge_block(
                 name=f"{name}_bottleneck_block_activation_2",
             )(x)
 
-        x = layers.add([x, shortcut])
+        x = layers.add([x, shortcut], name=f"{name}_edge_block_add")
         return x
 
     return apply
@@ -540,7 +542,7 @@ def cross_stage(
                 )(x)
                 if activation == "leaky_relu":
                     x = layers.LeakyReLU(
-                        negative_slope=0.1,
+                        negative_slope=0.01,
                         dtype=dtype,
                         name=f"{name}_cross_stage_activation_1",
                     )(x)
@@ -570,7 +572,7 @@ def cross_stage(
                 )(x)
                 if activation == "leaky_relu":
                     x = layers.LeakyReLU(
-                        negative_slope=0.1,
+                        negative_slope=0.01,
                         dtype=dtype,
                         name=f"{name}_cross_stage_activation_1",
                     )(x)
@@ -595,7 +597,7 @@ def cross_stage(
         if not cross_linear:
             if activation == "leaky_relu":
                 x = layers.LeakyReLU(
-                    negative_slope=0.1,
+                    negative_slope=0.01,
                     dtype=dtype,
                     name=f"{name}_cross_stage_activation_2",
                 )(x)
@@ -620,7 +622,7 @@ def cross_stage(
                 data_format=data_format,
                 channel_axis=channel_axis,
                 dtype=dtype,
-                name=f"block_{i}_{name}",
+                name=f"{name}_block_{i}",
             )(xb)
 
         xb = layers.Conv2D(
@@ -639,15 +641,15 @@ def cross_stage(
         )(xb)
         if activation == "leaky_relu":
             xb = layers.LeakyReLU(
-                negative_slope=0.1,
+                negative_slope=0.01,
                 dtype=dtype,
-                name=f"{name}_cross_stage_activation_3",
+                name=f"{name}_transition_b_activation",
             )(xb)
         else:
             xb = layers.Activation(
                 activation,
                 dtype=dtype,
-                name=f"{name}_cross_stage_activation_3",
+                name=f"{name}_transition_b_activation",
             )(xb)
 
         out = layers.Concatenate(
@@ -669,15 +671,15 @@ def cross_stage(
         )(out)
         if activation == "leaky_relu":
             out = layers.LeakyReLU(
-                negative_slope=0.1,
+                negative_slope=0.01,
                 dtype=dtype,
-                name=f"{name}_cross_stage_activation_4",
+                name=f"{name}_transition_activation",
             )(out)
         else:
             out = layers.Activation(
                 activation,
                 dtype=dtype,
-                name=f"{name}_cross_stage_activation_4",
+                name=f"{name}_transition_activation",
             )(out)
         return out
 
@@ -739,7 +741,7 @@ def cross_stage3(
                 )(x)
                 if activation == "leaky_relu":
                     x = layers.LeakyReLU(
-                        negative_slope=0.1,
+                        negative_slope=0.01,
                         dtype=dtype,
                         name=f"{name}_cross_stage3_activation_1",
                     )(x)
@@ -769,7 +771,7 @@ def cross_stage3(
                 )(x)
                 if activation == "leaky_relu":
                     x = layers.LeakyReLU(
-                        negative_slope=0.1,
+                        negative_slope=0.01,
                         dtype=dtype,
                         name=f"{name}_cross_stage3_activation_1",
                     )(x)
@@ -794,7 +796,7 @@ def cross_stage3(
         if not cross_linear:
             if activation == "leaky_relu":
                 x = layers.LeakyReLU(
-                    negative_slope=0.1,
+                    negative_slope=0.01,
                     dtype=dtype,
                     name=f"{name}_cross_stage3_activation_2",
                 )(x)
@@ -820,7 +822,7 @@ def cross_stage3(
                 data_format=data_format,
                 channel_axis=channel_axis,
                 dtype=dtype,
-                name=f"block_{i}_{name}",
+                name=f"{name}_block_{i}",
             )(x1)
 
         out = layers.Concatenate(
@@ -842,7 +844,7 @@ def cross_stage3(
         )(out)
         if activation == "leaky_relu":
             out = layers.LeakyReLU(
-                negative_slope=0.1,
+                negative_slope=0.01,
                 dtype=dtype,
                 name=f"{name}_cross_stage3_activation_3",
             )(out)
@@ -907,7 +909,7 @@ def create_csp_stem(
             )(x)
             if activation == "leaky_relu":
                 x = layers.LeakyReLU(
-                    negative_slope=0.1,
+                    negative_slope=0.01,
                     dtype=dtype,
                     name=f"csp_stem_activation_{i}",
                 )(x)
@@ -992,8 +994,8 @@ def create_csp_stages(
         net_stride *= stride[stage_idx]
         first_dilation = 1 if dilation in (1, 2) else 2
         stages = stage_fn(
-            data_format,
-            channel_axis,
+            data_format=data_format,
+            channel_axis=channel_axis,
             filters=filters[stage_idx],
             depth=stackwise_depth[stage_idx],
             stride=stride[stage_idx],
