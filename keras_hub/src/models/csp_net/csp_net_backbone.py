@@ -112,9 +112,9 @@ class CSPNetBackbone(FeaturePyramidBackbone):
         stage_type=None,
         activation="leaky_relu",
         output_strides=32,
-        bottle_ratio=(1.0),
-        block_ratio=(1.0),
-        expand_ratio=(1.0),
+        bottle_ratio=[1.0],
+        block_ratio=[1.0],
+        expand_ratio=[1.0],
         stem_padding="valid",
         stem_pooling=None,
         avg_down=False,
@@ -125,8 +125,26 @@ class CSPNetBackbone(FeaturePyramidBackbone):
         dtype=None,
         **kwargs,
     ):
-        assert stage_type in ("dark", "csp", "cs3")
-        assert block_type in ("dark_block", "edge_block", "bottleneck_block")
+        if block_type not in (
+            "dark_block",
+            "edge_block",
+            "bottleneck_block",
+        ):
+            raise ValueError(
+                '`block_type` must be either `"dark_block"`, '
+                '`"edge_block"`, or `"bottleneck_block"`.'
+                f"Received block_type={block_type}."
+            )
+
+        if stage_type not in (
+            "dark",
+            "csp",
+            "cs3",
+        ):
+            raise ValueError(
+                '`block_type` must be either `"dark"`, `"csp"`, or `"cs3"`.'
+                f"Received block_type={stage_type}."
+            )
         data_format = standardize_data_format(data_format)
         channel_axis = -1 if data_format == "channels_last" else 1
 
@@ -173,28 +191,28 @@ class CSPNetBackbone(FeaturePyramidBackbone):
         )
 
         # === Config ===
-        self.stem_filters = (stem_filters,)
-        self.stem_kernel_size = (stem_filters,)
-        self.stem_strides = (stem_strides,)
-        self.stackwise_depth = (stackwise_depth,)
-        self.stackwise_strides = (stackwise_strides,)
-        self.stackwise_num_filters = (stackwise_num_filters,)
-        self.stage_type = (stage_type,)
-        self.block_type = (block_type,)
-        self.output_strides = (output_strides,)
-        self.groups = (groups,)
-        self.activation = (activation,)
-        self.bottle_ratio = (bottle_ratio,)
-        self.block_ratio = (block_ratio,)
-        self.expand_ratio = (expand_ratio,)
-        self.stem_padding = (stem_padding,)
-        self.stem_pooling = (stem_pooling,)
-        self.avg_down = (avg_down,)
-        self.down_growth = (down_growth,)
-        self.cross_linear = (cross_linear,)
-        self.image_shape = (image_shape,)
-        self.data_format = (data_format,)
-        self.image_shape = (image_shape,)
+        self.stem_filters = stem_filters
+        self.stem_kernel_size = stem_filters
+        self.stem_strides = stem_strides
+        self.stackwise_depth = stackwise_depth
+        self.stackwise_strides = stackwise_strides
+        self.stackwise_num_filters = stackwise_num_filters
+        self.stage_type = stage_type
+        self.block_type = block_type
+        self.output_strides = output_strides
+        self.groups = groups
+        self.activation = activation
+        self.bottle_ratio = bottle_ratio
+        self.block_ratio = block_ratio
+        self.expand_ratio = expand_ratio
+        self.stem_padding = stem_padding
+        self.stem_pooling = stem_pooling
+        self.avg_down = avg_down
+        self.down_growth = down_growth
+        self.cross_linear = cross_linear
+        self.image_shape = image_shape
+        self.data_format = data_format
+        self.image_shape = image_shape
         self.pyramid_outputs = pyramid_outputs
 
     def get_config(self):
