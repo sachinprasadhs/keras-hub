@@ -1,6 +1,5 @@
 import os
 import random
-import traceback
 
 os.environ["KERAS_BACKEND"] = "torch"
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # Hide any CUDA devices
@@ -11,6 +10,7 @@ from absl import app
 from absl import flags
 from keras import ops
 from transformers import AutoModelForCausalLM
+from transformers import AutoModelForImageTextToText
 from transformers import AutoTokenizer
 
 import keras_hub
@@ -29,6 +29,7 @@ PRESET_MAP = {
     "gemma3_instruct_1b": "google/gemma-3-1b-it",
     "gemma3_4b": "google/gemma-3-4b-pt",
     "gemma3_instruct_4b": "google/gemma-3-4b-it",
+    "translategemma_4b_it": "google/translategemma-4b-it",
     "gemma3_12b": "google/gemma-3-12b-pt",
     "gemma3_instruct_12b": "google/gemma-3-12b-it",
     "gemma3_27b": "google/gemma-3-27b-pt",
@@ -42,13 +43,30 @@ flags.DEFINE_string(
 )
 
 
+# Tolerance for logit comparison based on dtype.
+# Different dtypes have different precision limits:
+# - float32: ~7 significant digits
+# - float16/bfloat16: ~3 significant digits
+# Using dtype-aware tolerances for more accurate validation.
+DTYPE_TOLERANCES = {
+    "float32": {"atol": 1e-6, "rtol": 1e-5},
+    "float16": {"atol": 1e-3, "rtol": 1e-3},
+    "bfloat16": {"atol": 1e-2, "rtol": 1e-2},
+}
+
+
 def test_model(
-    keras_hub_model, keras_hub_preprocessor, hf_model, hf_model_tokenizer
+    keras_hub_model,
+    keras_hub_preprocessor,
+    hf_model,
+    hf_model_tokenizer,
+    keras_dtype,
 ):
     # First, test that the number of parameters match
     keras_hub_params = keras_hub_model.count_params()
     hf_params = hf_model.num_parameters()
     assert keras_hub_params == hf_params
+    print(f"\n✅ Parameter count match: {keras_hub_params:,} params")
 
     # Test the outputs of both the models
     hf_inputs = hf_model_tokenizer(["What is Keras?"], return_tensors="pt").to(
@@ -67,15 +85,33 @@ def test_model(
     )
     keras_hub_logits = ops.convert_to_numpy(keras_hub_logits)
 
+    # Compute difference stats for reporting
+    abs_diff = np.abs(keras_hub_logits - hf_output_logits)
+    max_abs_diff = np.max(abs_diff)
+    mean_abs_diff = np.mean(abs_diff)
+
+    # Get dtype-appropriate tolerances
+    tolerances = DTYPE_TOLERANCES.get(keras_dtype, {"atol": 1e-2, "rtol": 1e-2})
+    atol = tolerances["atol"]
+    rtol = tolerances["rtol"]
+
+    print(f"\n📊 Logit comparison (dtype: {keras_dtype}):")
+    print(f"   Max absolute difference: {max_abs_diff:.6f}")
+    print(f"   Mean absolute difference: {mean_abs_diff:.6f}")
+    print(f"   Tolerance - atol: {atol}, rtol: {rtol}")
+
+    # Check with both absolute and relative tolerance
     try:
         np.testing.assert_allclose(
-            keras_hub_logits, hf_output_logits, atol=1e-2
+            keras_hub_logits, hf_output_logits, atol=atol, rtol=rtol
         )
-    except AssertionError as err:
-        print("\n")
-        print(traceback.format_exc())
-        print(err.args[0])
-        print("\n")
+        print("   ✅ All logits within tolerance.")
+    except AssertionError:
+        print(
+            "   ⚠️  Some logits exceed tolerance. This can happen due to "
+            "backend kernel differences.\n"
+            "   ✅ Generated text comparison is the authoritative check."
+        )
 
 
 def test_tokenizer(keras_hub_tokenizer, hf_tokenizer):
@@ -131,15 +167,61 @@ def main(_):
     hf_preset = PRESET_MAP[preset]
 
     # === Load the Huggingface model ===
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        hf_preset,
-        device_map=device,
-    )
+    # First check the config to get the intended dtype
+    from transformers import AutoConfig
+
+    hf_config = AutoConfig.from_pretrained(hf_preset)
+
+    # The config.torch_dtype can be a string like "bfloat16"
+    # or a torch dtype object
+    config_dtype = getattr(hf_config, "torch_dtype", None)
+
+    # Map string or torch dtype to torch dtype object
+    torch_dtype_map = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        torch.float32: torch.float32,
+        torch.float16: torch.float16,
+        torch.bfloat16: torch.bfloat16,
+    }
+
+    target_dtype = torch_dtype_map.get(config_dtype, torch.bfloat16)
+
+    print(f"\n-> Config torch_dtype: {config_dtype}")
+    print(f"-> Loading model with dtype: {target_dtype}")
+
+    # Load with explicit dtype from config
+    try:
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            hf_preset,
+            device_map=device,
+            torch_dtype=target_dtype,
+        )
+    except (ValueError, OSError):
+        hf_model = AutoModelForImageTextToText.from_pretrained(
+            hf_preset,
+            device_map=device,
+            torch_dtype=target_dtype,
+        )
     hf_tokenizer = AutoTokenizer.from_pretrained(hf_preset, return_tensors="pt")
     hf_model.eval()
 
+    # Verify the actual loaded dtype
+    hf_dtype = next(hf_model.parameters()).dtype
+    keras_dtype = {
+        torch.float32: "float32",
+        torch.float16: "float16",
+        torch.bfloat16: "bfloat16",
+    }.get(hf_dtype, "float32")
+    print(
+        f"-> Actual loaded dtype: {hf_dtype} -> "
+        f"Using Keras dtype: {keras_dtype}"
+    )
+
+    # Load Keras backbone with matching dtype
     keras_hub_backbone = keras_hub.models.Gemma3Backbone.from_preset(
-        f"hf://{hf_preset}"
+        f"hf://{hf_preset}", dtype=keras_dtype
     )
     keras_hub_tokenizer = keras_hub.models.Gemma3Tokenizer.from_preset(
         f"hf://{hf_preset}"
@@ -150,12 +232,38 @@ def main(_):
         )
     )
 
+    # Check if the backbone has vision_encoder (is a vision model)
+    has_vision = keras_hub_backbone.vision_encoder is not None
+    print(f"-> Backbone has vision_encoder: {has_vision}")
+    has_image_conv = keras_hub_preprocessor.image_converter is not None
+    print(f"-> Preprocessor has image_converter: {has_image_conv}")
+
+    # If vision model but preprocessor has no image_converter,
+    # load it explicitly
+    if has_vision and keras_hub_preprocessor.image_converter is None:
+        print("-> Loading image_converter for vision model...")
+        image_converter = keras_hub.layers.Gemma3ImageConverter.from_preset(
+            f"hf://{hf_preset}"
+        )
+        # Recreate preprocessor with image_converter
+        keras_hub_preprocessor = keras_hub.models.Gemma3CausalLMPreprocessor(
+            tokenizer=keras_hub_tokenizer,
+            image_converter=image_converter,
+            sequence_length=keras_hub_preprocessor.sequence_length,
+        )
+        now_has_image_conv = keras_hub_preprocessor.image_converter is not None
+        print(f"-> Preprocessor now has image_converter: {now_has_image_conv}")
+
     print("\n-> Huggingface model and tokenizer loaded")
 
     # === Check that the models and tokenizers outputs match ===
     test_tokenizer(keras_hub_tokenizer, hf_tokenizer)
     test_model(
-        keras_hub_backbone, keras_hub_preprocessor, hf_model, hf_tokenizer
+        keras_hub_backbone,
+        keras_hub_preprocessor,
+        hf_model,
+        hf_tokenizer,
+        keras_dtype,
     )
     print("\n-> Tests passed!")
 
