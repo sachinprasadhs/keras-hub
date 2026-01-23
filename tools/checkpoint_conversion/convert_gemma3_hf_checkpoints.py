@@ -1,5 +1,6 @@
 import os
 import random
+import traceback
 
 os.environ["KERAS_BACKEND"] = "torch"
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # Hide any CUDA devices
@@ -62,7 +63,7 @@ def test_model(
     keras_hub_params = keras_hub_model.count_params()
     hf_params = hf_model.num_parameters()
     assert keras_hub_params == hf_params
-    print(f"\n✅ Parameter count match: {keras_hub_params:,} params")
+    print(f"\n✓ Parameter count match: {keras_hub_params:,} params")
 
     # Test the outputs of both the models
     hf_inputs = hf_model_tokenizer(["What is Keras?"], return_tensors="pt").to(
@@ -91,7 +92,7 @@ def test_model(
     atol = tolerances["atol"]
     rtol = tolerances["rtol"]
 
-    print(f"\n📊 Logit comparison (dtype: {keras_dtype}):")
+    print(f"\nLogit comparison (dtype: {keras_dtype}):")
     print(f"   Max absolute difference: {max_abs_diff:.6f}")
     print(f"   Mean absolute difference: {mean_abs_diff:.6f}")
     print(f"   Tolerance - atol: {atol}, rtol: {rtol}")
@@ -101,13 +102,32 @@ def test_model(
         np.testing.assert_allclose(
             keras_hub_logits, hf_output_logits, atol=atol, rtol=rtol
         )
-        print("   ✅ All logits within tolerance.")
-    except AssertionError:
+        print("✓ All logits within tolerance.")
+    except AssertionError as err:
         print(
-            "   ⚠️  Some logits exceed tolerance. This can happen due to "
-            "backend kernel differences.\n"
-            "   ✅ Generated text comparison is the authoritative check."
+            "Some logits exceed tolerance (likely kernel differences).\n"
+            "NOTE: Generated text comparison is the authoritative check."
         )
+        # Provide detailed mismatch information for debugging
+        print("Traceback:")
+        print(traceback.format_exc())
+        print("Assertion message:")
+        print(err.args[0])
+
+    # Sequence-wide normalized top-k comparison (all timesteps)
+    k = 50
+    print(f"Top-{k} normalized logits check across all timesteps:")
+    hf_norm = hf_output_logits - hf_output_logits.max(axis=-1, keepdims=True)
+    kh_norm = keras_hub_logits - keras_hub_logits.max(axis=-1, keepdims=True)
+    hf_topk = np.partition(hf_norm, -k, axis=-1)[..., -k:]
+    kh_topk = np.partition(kh_norm, -k, axis=-1)[..., -k:]
+    try:
+        np.testing.assert_allclose(kh_topk, hf_topk, atol=atol, rtol=rtol)
+        print("✓ Top-50 normalized logits within tolerance.")
+    except AssertionError as err:
+        print("Top-50 normalized logits exceed tolerance.")
+        print(traceback.format_exc())
+        print(err.args[0])
 
 
 def test_tokenizer(keras_hub_tokenizer, hf_tokenizer):
