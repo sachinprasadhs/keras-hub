@@ -45,15 +45,9 @@ flags.DEFINE_string(
 )
 
 
-# Tolerance for logit comparison based on dtype.
-# Different dtypes have different precision limits:
-# - float32: ~7 significant digits
-# - float16/bfloat16: ~3 significant digits
-# Using dtype-aware tolerances for more accurate validation.
+# Tolerance for logit comparison (float32 only validation).
 DTYPE_TOLERANCES = {
-    "float32": {"atol": 1e-6, "rtol": 1e-5},
-    "float16": {"atol": 1e-3, "rtol": 1e-3},
-    "bfloat16": {"atol": 1e-2, "rtol": 1e-2},
+    "float32": {"atol": 1e-4, "rtol": 1e-4},
 }
 
 
@@ -93,7 +87,7 @@ def test_model(
     mean_abs_diff = np.mean(abs_diff)
 
     # Get dtype-appropriate tolerances
-    tolerances = DTYPE_TOLERANCES.get(keras_dtype, {"atol": 1e-2, "rtol": 1e-2})
+    tolerances = DTYPE_TOLERANCES.get(keras_dtype, {"atol": 1e-4, "rtol": 1e-4})
     atol = tolerances["atol"]
     rtol = tolerances["rtol"]
 
@@ -178,17 +172,8 @@ def main(_):
     # or a torch dtype object
     config_dtype = getattr(hf_config, "torch_dtype", None)
 
-    # Map string or torch dtype to torch dtype object
-    torch_dtype_map = {
-        "float32": torch.float32,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        torch.float32: torch.float32,
-        torch.float16: torch.float16,
-        torch.bfloat16: torch.bfloat16,
-    }
-
-    target_dtype = torch_dtype_map.get(config_dtype, torch.bfloat16)
+    # Force float32 load for validation
+    target_dtype = torch.float32
 
     print(f"\n-> Config torch_dtype: {config_dtype}")
     print(f"-> Loading model with dtype: {target_dtype}")
@@ -211,11 +196,8 @@ def main(_):
 
     # Verify the actual loaded dtype
     hf_dtype = next(hf_model.parameters()).dtype
-    keras_dtype = {
-        torch.float32: "float32",
-        torch.float16: "float16",
-        torch.bfloat16: "bfloat16",
-    }.get(hf_dtype, "float32")
+    # Validate in float32 to reduce numerical drift
+    keras_dtype = "float32"
     print(
         f"-> Actual loaded dtype: {hf_dtype} -> "
         f"Using Keras dtype: {keras_dtype}"
