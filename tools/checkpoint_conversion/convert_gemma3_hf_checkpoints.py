@@ -30,6 +30,8 @@ PRESET_MAP = {
     "gemma3_4b": "google/gemma-3-4b-pt",
     "gemma3_instruct_4b": "google/gemma-3-4b-it",
     "translategemma_4b_it": "google/translategemma-4b-it",
+    "translategemma_12b_it": "google/translategemma-12b-it",
+    "translategemma_27b_it": "google/translategemma-27b-it",
     "gemma3_12b": "google/gemma-3-12b-pt",
     "gemma3_instruct_12b": "google/gemma-3-12b-it",
     "gemma3_27b": "google/gemma-3-27b-pt",
