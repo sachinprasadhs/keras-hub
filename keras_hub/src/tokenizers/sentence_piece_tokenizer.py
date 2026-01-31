@@ -260,14 +260,7 @@ class SentencePieceTokenizer(tokenizer.Tokenizer):
         inputs, unbatched, rectangular = convert_to_ragged_batch(inputs)
         # tf-text sentencepiece does not handle int64.
         inputs = tf.cast(inputs, "int32")
-
-        # Use id_to_string to properly handle special tokens
-        # detokenize() skips special tokens, id_to_string() includes them
-        tokens = self._sentence_piece.id_to_string(inputs)
-
-        # Join tokens back into strings
-        outputs = tf.strings.reduce_join(tokens, axis=-1)
-
+        outputs = self._sentence_piece.detokenize(inputs)
         if unbatched:
             outputs = tf.squeeze(outputs, 0)
         return outputs

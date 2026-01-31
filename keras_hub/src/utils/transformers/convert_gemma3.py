@@ -105,10 +105,10 @@ def convert_backbone_config(transformers_config):
         ),
         # Handle soft-capping parameters (may be null)
         "attention_logit_soft_cap": transformer_config.get(
-            "attn_logit_softcap", None
+            "attn_logit_softcapping", None
         ),
         "final_logit_soft_cap": transformer_config.get(
-            "final_logit_softcap", None
+            "final_logit_softcapping", None
         ),
         # Use sliding window attention if configured
         "use_sliding_window_attention": use_sliding_window_attention,
