@@ -51,17 +51,41 @@ def convert_backbone_config(transformers_config):
         vision_encoder = Gemma3VisionEncoder(**vision_encoder_config)
         transformer_config = transformers_config["text_config"]
 
-    if "rope_parameters" in transformer_config:
-        rope_global_config = transformer_config.get("rope_parameters", {}).get(
-            "full_attention"
-        )
+    # Extract rope parameters
+    if (
+        "rope_parameters" in transformer_config
+        and transformer_config["rope_parameters"]
+    ):
+        rope_params = transformer_config["rope_parameters"]
+        # Full attention uses the specified rope scaling factor
+        rope_global_config = rope_params.get("full_attention", {})
+        # Local attention uses default (no custom scaling)
+        rope_local_config = rope_params.get("sliding_attention", {})
     elif "rope_scaling" in transformer_config:
-        rope_global_config = transformer_config["rope_scaling"]
+        rope_global_config = transformer_config["rope_scaling"] or {}
+        rope_local_config = {}
     else:
         rope_global_config = {}
+        rope_local_config = {}
 
+    # Determine sliding window attention usage from layer_types or config
     sliding_window = transformer_config.get("sliding_window", None)
-    use_sliding_window_attention = sliding_window not in (None, 0)
+    layer_types = transformer_config.get("layer_types", [])
+
+    use_sliding_window_attention = sliding_window not in (None, 0) or any(
+        lt == "sliding_attention" for lt in layer_types
+    )
+
+    # Determine query_head_dim_normalize
+    # If query_pre_attn_scalar equals head_dim, then normalize by head_dim
+    query_pre_attn_scalar = transformer_config.get(
+        "query_pre_attn_scalar", None
+    )
+    head_dim = transformer_config.get("head_dim")
+    if query_pre_attn_scalar is not None and head_dim is not None:
+        query_head_dim_normalize = query_pre_attn_scalar == head_dim
+    else:
+        query_head_dim_normalize = True
 
     return {
         "vocabulary_size": transformer_config.get(
@@ -74,24 +98,34 @@ def convert_backbone_config(transformers_config):
         "hidden_dim": transformer_config["hidden_size"],
         "intermediate_dim": transformer_config["intermediate_size"],
         "head_dim": transformer_config["head_dim"],
-        "use_post_ffw_norm": True,
-        "use_post_attention_norm": True,
+        # Gemma3 models use post-norm and post-attention norm by default
+        "use_post_ffw_norm": transformer_config.get("use_post_ffw_norm", True),
+        "use_post_attention_norm": transformer_config.get(
+            "use_post_attention_norm", True
+        ),
+        # Handle soft-capping parameters (may be null)
         "attention_logit_soft_cap": transformer_config.get(
             "attn_logit_softcap", None
         ),
         "final_logit_soft_cap": transformer_config.get(
             "final_logit_softcap", None
         ),
+        # Use sliding window attention if configured
         "use_sliding_window_attention": use_sliding_window_attention,
-        "query_head_dim_normalize": True,
-        "sliding_window_size": sliding_window or 0,
-        "local_rope_scaling_factor": 1.0,
-        "global_rope_scaling_factor": (
-            rope_global_config.get("factor", 1.0) if rope_global_config else 1.0
-        ),
+        # Normalize query by head_dim if query_pre_attn_scalar == head_dim
+        "query_head_dim_normalize": query_head_dim_normalize,
+        # Sliding window size (default to 1024 for full attention layers)
+        "sliding_window_size": sliding_window or 4096,
+        # Rope scaling factors for local (sliding) and global (full) attention
+        "local_rope_scaling_factor": rope_local_config.get("factor", 1.0),
+        "global_rope_scaling_factor": rope_global_config.get("factor", 1.0),
         "layer_norm_epsilon": transformer_config.get("rms_norm_eps", 1e-6),
         "use_bidirectional_attention": transformer_config.get(
             "use_bidirectional_attention", False
+        ),
+        # Gemma3 uses query/key normalization by default
+        "use_query_key_norm": transformer_config.get(
+            "use_query_key_norm", True
         ),
         "vision_encoder": vision_encoder,
     }
