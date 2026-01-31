@@ -59,6 +59,10 @@ def convert_backbone_config(transformers_config):
         rope_global_config = transformer_config["rope_scaling"]
     else:
         rope_global_config = {}
+
+    sliding_window = transformer_config.get("sliding_window", None)
+    use_sliding_window_attention = sliding_window not in (None, 0)
+
     return {
         "vocabulary_size": transformer_config.get(
             "vocab_size", 262144 if vision_encoder is None else 262208
@@ -78,9 +82,9 @@ def convert_backbone_config(transformers_config):
         "final_logit_soft_cap": transformer_config.get(
             "final_logit_softcap", None
         ),
-        "use_sliding_window_attention": True,
+        "use_sliding_window_attention": use_sliding_window_attention,
         "query_head_dim_normalize": True,
-        "sliding_window_size": transformer_config["sliding_window"],
+        "sliding_window_size": sliding_window or 0,
         "local_rope_scaling_factor": 1.0,
         "global_rope_scaling_factor": (
             rope_global_config.get("factor", 1.0) if rope_global_config else 1.0
