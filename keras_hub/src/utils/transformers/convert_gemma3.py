@@ -72,10 +72,10 @@ def convert_backbone_config(transformers_config):
         "head_dim": transformer_config["head_dim"],
         "use_post_ffw_norm": True,
         "use_post_attention_norm": True,
-        "attention_logit_softcap": transformer_config.get(
+        "attention_logit_soft_cap": transformer_config.get(
             "attn_logit_softcap", None
         ),
-        "final_logit_softcap": transformer_config.get(
+        "final_logit_soft_cap": transformer_config.get(
             "final_logit_softcap", None
         ),
         "use_sliding_window_attention": True,
