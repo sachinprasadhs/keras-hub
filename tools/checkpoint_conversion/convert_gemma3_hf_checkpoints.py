@@ -167,7 +167,11 @@ def _debug_layerwise_outputs(
         h.detach().cpu().float().numpy() for h in hf_outputs.hidden_states
     ]
 
-    backbone = keras_hub_model.backbone
+    backbone = (
+        keras_hub_model.backbone
+        if hasattr(keras_hub_model, "backbone")
+        else keras_hub_model
+    )
     token_ids = keras_hub_inputs["token_ids"]
     padding_mask = keras_hub_inputs["padding_mask"]
 
