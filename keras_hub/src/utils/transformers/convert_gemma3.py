@@ -51,22 +51,18 @@ def convert_backbone_config(transformers_config):
         vision_encoder = Gemma3VisionEncoder(**vision_encoder_config)
         transformer_config = transformers_config["text_config"]
 
-    # Extract rope parameters
-    if (
-        "rope_parameters" in transformer_config
-        and transformer_config["rope_parameters"]
-    ):
-        rope_params = transformer_config["rope_parameters"]
-        # Full attention uses the specified rope scaling factor
-        rope_global_config = rope_params.get("full_attention", {})
-        # Local attention uses default (no custom scaling)
-        rope_local_config = rope_params.get("sliding_attention", {})
-    elif "rope_scaling" in transformer_config:
-        rope_global_config = transformer_config["rope_scaling"] or {}
-        rope_local_config = {}
+    # Extract rope parameters. HuggingFace uses `rope_scaling` for the
+    # global rotary embedding. `rope_parameters` is optional and not used
+    # by HF for global scaling when `rope_scaling` is None.
+    rope_scaling = transformer_config.get("rope_scaling", None)
+    rope_params = transformer_config.get("rope_parameters") or {}
+
+    if rope_scaling is not None:
+        rope_global_config = rope_scaling or {}
     else:
         rope_global_config = {}
-        rope_local_config = {}
+
+    rope_local_config = rope_params.get("sliding_attention", {})
 
     # Determine sliding window attention usage from layer_types or config
     sliding_window = transformer_config.get("sliding_window", None)
@@ -376,14 +372,6 @@ def convert_weights(backbone, loader, transformers_config):
 
 def _resolve_multimodal_prefix(loader):
     candidates = ["model.language_model", "language_model.model"]
-    safetensor_config = getattr(loader, "safetensor_config", None)
-    if safetensor_config is not None:
-        weight_map = safetensor_config.get("weight_map", {})
-        for candidate in candidates:
-            key = f"{candidate}.embed_tokens.weight"
-            if key in weight_map:
-                return candidate
-
     for candidate in candidates:
         key = f"{candidate}.embed_tokens.weight"
         try:
