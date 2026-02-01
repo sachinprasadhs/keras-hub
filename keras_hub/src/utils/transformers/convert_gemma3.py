@@ -135,7 +135,7 @@ def convert_weights(backbone, loader, transformers_config):
     if transformers_config["model_type"] == "gemma3_text":
         prefix = "model"
     else:
-        prefix = "model.language_model"
+        prefix = _resolve_multimodal_prefix(loader)
 
     loader.port_weight(
         keras_variable=backbone.get_layer("token_embedding").embeddings,
@@ -372,6 +372,18 @@ def convert_weights(backbone, loader, transformers_config):
     )
 
     return backbone
+
+
+def _resolve_multimodal_prefix(loader):
+    candidates = ["model.language_model", "language_model.model"]
+    for candidate in candidates:
+        key = f"{candidate}.embed_tokens.weight"
+        try:
+            loader.get_tensor(key)
+            return candidate
+        except Exception:
+            continue
+    return candidates[0]
 
 
 def convert_tokenizer(cls, preset, **kwargs):
