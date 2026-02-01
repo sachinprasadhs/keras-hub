@@ -135,7 +135,7 @@ def convert_weights(backbone, loader, transformers_config):
     if transformers_config["model_type"] == "gemma3_text":
         prefix = "model"
     else:
-        prefix = "language_model.model"
+        prefix = "model.language_model"
 
     loader.port_weight(
         keras_variable=backbone.get_layer("token_embedding").embeddings,

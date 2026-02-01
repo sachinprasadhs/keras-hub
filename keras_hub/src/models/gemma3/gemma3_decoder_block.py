@@ -91,7 +91,7 @@ class Gemma3DecoderBlock(keras.layers.Layer):
             logit_soft_cap=logit_soft_cap,
             use_sliding_window_attention=use_sliding_window_attention,
             sliding_window_size=sliding_window_size,
-            query_head_dim_normalize=True,
+            query_head_dim_normalize=query_head_dim_normalize,
             rope_wavelength=rope_wavelength,
             rope_scaling_factor=rope_scaling_factor,
             dropout=dropout,

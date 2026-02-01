@@ -22,3 +22,5 @@ build/
 venv/
 .venv/
 .DS_Store
+
+test_config_mapping.py
