@@ -65,16 +65,18 @@ def test_model(
     assert keras_hub_params == hf_params
     print(f"\n✓ Parameter count match: {keras_hub_params:,} params")
 
-    # Test the outputs of both the models
-    hf_inputs = hf_model_tokenizer(["What is Keras?"], return_tensors="pt").to(
-        device
-    )
-    hf_outputs = hf_model(**hf_inputs)
-    hf_output_logits = hf_outputs.logits.detach().cpu().float().numpy()
-
+    # Test the outputs of both the models using identical inputs.
     keras_hub_inputs = keras_hub_preprocessor.generate_preprocess(
         ["What is Keras?"], sequence_length=6
     )
+    hf_inputs = {
+        "input_ids": torch.tensor(keras_hub_inputs["token_ids"]).to(device),
+        "attention_mask": torch.tensor(keras_hub_inputs["padding_mask"]).to(
+            device
+        ),
+    }
+    hf_outputs = hf_model(**hf_inputs)
+    hf_output_logits = hf_outputs.logits.detach().cpu().float().numpy()
 
     keras_hub_output = keras_hub_model(keras_hub_inputs)
     keras_hub_logits = keras_hub_model.token_embedding(

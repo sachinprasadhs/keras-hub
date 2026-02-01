@@ -376,6 +376,14 @@ def convert_weights(backbone, loader, transformers_config):
 
 def _resolve_multimodal_prefix(loader):
     candidates = ["model.language_model", "language_model.model"]
+    safetensor_config = getattr(loader, "safetensor_config", None)
+    if safetensor_config is not None:
+        weight_map = safetensor_config.get("weight_map", {})
+        for candidate in candidates:
+            key = f"{candidate}.embed_tokens.weight"
+            if key in weight_map:
+                return candidate
+
     for candidate in candidates:
         key = f"{candidate}.embed_tokens.weight"
         try:
