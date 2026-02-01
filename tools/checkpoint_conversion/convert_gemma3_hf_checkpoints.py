@@ -115,6 +115,12 @@ def test_model(
         print(traceback.format_exc())
         print("Assertion message:")
         print(err.args[0])
+        _debug_layerwise_outputs(
+            keras_hub_model=keras_hub_model,
+            keras_hub_inputs=keras_hub_inputs,
+            hf_model=hf_model,
+            hf_inputs=hf_inputs,
+        )
 
     # Sequence-wide normalized top-k comparison (all timesteps)
     k = 50
@@ -144,6 +150,47 @@ def test_tokenizer(keras_hub_tokenizer, hf_tokenizer):
     keras_hub_output = ops.convert_to_numpy(keras_hub_output["token_ids"])
 
     np.testing.assert_equal(keras_hub_output, hf_output)
+
+
+def _debug_layerwise_outputs(
+    keras_hub_model,
+    keras_hub_inputs,
+    hf_model,
+    hf_inputs,
+):
+    print("\nLayer-wise hidden state comparison:")
+
+    hf_outputs = hf_model(
+        **hf_inputs, output_hidden_states=True, return_dict=True
+    )
+    hf_hidden_states = [
+        h.detach().cpu().float().numpy() for h in hf_outputs.hidden_states
+    ]
+
+    backbone = keras_hub_model.backbone
+    token_ids = keras_hub_inputs["token_ids"]
+    padding_mask = keras_hub_inputs["padding_mask"]
+
+    x = backbone.token_embedding(token_ids)
+    x = x * ops.cast(ops.sqrt(backbone.hidden_dim), x.dtype)
+    keras_hidden_states = [ops.convert_to_numpy(x)]
+    for layer in backbone.transformer_layers:
+        x = layer(x, padding_mask=padding_mask, vision_mask=None)
+        keras_hidden_states.append(ops.convert_to_numpy(x))
+    x = backbone.layer_norm(x)
+    keras_hidden_states.append(ops.convert_to_numpy(x))
+
+    print(
+        f"  HF hidden_states: {len(hf_hidden_states)} | "
+        f"Keras hidden_states: {len(keras_hidden_states)}"
+    )
+
+    num_layers = min(len(hf_hidden_states), len(keras_hidden_states))
+    for i in range(num_layers):
+        kh = keras_hidden_states[i]
+        hf = hf_hidden_states[i]
+        diff = np.abs(kh - hf)
+        print(f"  Layer {i:02d}: max={diff.max():.6f}, mean={diff.mean():.6f}")
 
 
 def validate_output(
