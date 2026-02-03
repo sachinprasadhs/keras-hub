@@ -60,7 +60,7 @@ def convert_backbone_config(transformers_config):
     if rope_scaling is not None:
         rope_global_config = rope_scaling or {}
     else:
-        rope_global_config = {}
+        rope_global_config = rope_params.get("full_attention", {})
 
     rope_local_config = rope_params.get("sliding_attention", {})
 
