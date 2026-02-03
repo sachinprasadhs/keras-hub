@@ -263,7 +263,13 @@ class Gemma3CausalLM(CausalLM):
                 vision_mask = ops.expand_dims(vision_mask, axis=0)
             if len(ops.shape(vision_indices)) == 1:
                 vision_indices = ops.expand_dims(vision_indices, axis=0)
-            img_embeddings = self.backbone.vision_encoder(images)
+            # Check if batch dimension is non-empty after expansion
+            if ops.shape(images)[0] > 0:
+                img_embeddings = self.backbone.vision_encoder(images)
+            else:
+                img_embeddings = None
+                vision_mask = None
+                vision_indices = None
         else:
             img_embeddings = None
             vision_mask = None
