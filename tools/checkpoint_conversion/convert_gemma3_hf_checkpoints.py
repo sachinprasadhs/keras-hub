@@ -241,6 +241,45 @@ def main(_):
 
     hf_config = AutoConfig.from_pretrained(hf_preset)
 
+    config_dict = hf_config.to_dict()
+    transformer_config = config_dict.get("text_config", config_dict)
+    rope_scaling = transformer_config.get("rope_scaling", None)
+    rope_parameters = transformer_config.get("rope_parameters", None)
+    layer_types = transformer_config.get("layer_types", None)
+    sliding_window = transformer_config.get("sliding_window", None)
+    query_pre_attn_scalar = transformer_config.get(
+        "query_pre_attn_scalar", None
+    )
+    head_dim = transformer_config.get("head_dim", None)
+    use_query_key_norm = transformer_config.get("use_query_key_norm", None)
+    use_post_ffw_norm = transformer_config.get("use_post_ffw_norm", None)
+    use_post_attention_norm = transformer_config.get(
+        "use_post_attention_norm", None
+    )
+    attn_logit_softcapping = transformer_config.get(
+        "attn_logit_softcapping", None
+    )
+    final_logit_softcapping = transformer_config.get(
+        "final_logit_softcapping", None
+    )
+
+    print("\n-> HF config debug (text_config):")
+    model_type = transformer_config.get("model_type", None)
+    num_hidden_layers = transformer_config.get("num_hidden_layers", None)
+    print(f"   model_type: {model_type}")
+    print(f"   num_hidden_layers: {num_hidden_layers}")
+    print(f"   head_dim: {head_dim}")
+    print(f"   query_pre_attn_scalar: {query_pre_attn_scalar}")
+    print(f"   use_query_key_norm: {use_query_key_norm}")
+    print(f"   use_post_ffw_norm: {use_post_ffw_norm}")
+    print(f"   use_post_attention_norm: {use_post_attention_norm}")
+    print(f"   sliding_window: {sliding_window}")
+    print(f"   layer_types: {layer_types}")
+    print(f"   rope_scaling: {rope_scaling}")
+    print(f"   rope_parameters: {rope_parameters}")
+    print(f"   attn_logit_softcapping: {attn_logit_softcapping}")
+    print(f"   final_logit_softcapping: {final_logit_softcapping}")
+
     # The config.torch_dtype can be a string like "bfloat16"
     # or a torch dtype object
     config_dtype = getattr(hf_config, "torch_dtype", None)
