@@ -250,16 +250,23 @@ class Gemma3CausalLM(CausalLM):
             inputs.get("vision_indices", None),
         )
 
-        # Handle shape expansion for unbatched inputs
-        if images is not None:
-            if len(ops.shape(images)) == 4:
-                images = ops.expand_dims(images, axis=0)
-            if len(ops.shape(vision_mask)) == 1:
+        # Handle shape expansion for unbatched inputs.
+        # Images can be: [batch, num_images, H, W, C] or [num_images, H, W, C]
+        # For text-only: [batch, 0, H, W, C] or [0, H, W, C]
+        if images is not None and len(ops.shape(images)) == 4:
+            images = ops.expand_dims(images, axis=0)
+            # Also expand vision_mask and vision_indices if they exist
+            if vision_mask is not None and len(ops.shape(vision_mask)) == 1:
                 vision_mask = ops.expand_dims(vision_mask, axis=0)
-            if len(ops.shape(vision_indices)) == 1:
+            if (
+                vision_indices is not None
+                and len(ops.shape(vision_indices)) == 1
+            ):
                 vision_indices = ops.expand_dims(vision_indices, axis=0)
 
-        # Process images if we have a vision model with actual images
+        # Check if we have actual images to process
+        # Shape after expansion is [batch, num_images, H, W, C]
+        # For text-only, num_images dimension is 0
         has_images = (
             not self.backbone.text_only_model
             and images is not None
@@ -274,7 +281,6 @@ class Gemma3CausalLM(CausalLM):
             vision_mask = None
             vision_indices = None
 
-        # Create and seed cache with a single forward pass.
         hidden_states, cache = self._build_cache(
             token_ids,
             img_embeddings,
