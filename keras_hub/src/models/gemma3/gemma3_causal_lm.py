@@ -253,6 +253,8 @@ class Gemma3CausalLM(CausalLM):
         # Check if we have actual images before any processing
         # Text-only inputs: [0, H, W, C] (4D) or [batch, 0, H, W, C] (5D)
         # Empty image batches have 0 in the num_images dimension
+
+        # Initialize img_embeddings, must be set in all code paths for AutoGraph
         img_embeddings = None
 
         # Only process images if we have a vision model and non-empty images
@@ -263,35 +265,29 @@ class Gemma3CausalLM(CausalLM):
         )
 
         if should_process_images:
-            # Check the shape to find where the num_images dimension is
+            # Get image shape upfront
             image_shape = ops.shape(images)
             ndim = len(image_shape)
 
-            # Determine if we have actual images based on dimensionality
+            # Determine num_images based on dimensionality
             if ndim == 4:
-                # For 4D: [num_images, H, W, C] - check first dimension
                 num_images = image_shape[0]
+                # Expand 4D to 5D upfront
+                images = ops.expand_dims(images, axis=0)
+                if vision_mask is not None and len(ops.shape(vision_mask)) == 1:
+                    vision_mask = ops.expand_dims(vision_mask, axis=0)
+                if (
+                    vision_indices is not None
+                    and len(ops.shape(vision_indices)) == 1
+                ):
+                    vision_indices = ops.expand_dims(vision_indices, axis=0)
             elif ndim == 5:
-                # For 5D: [batch, num_images, H, W, C] - check second dim
                 num_images = image_shape[1]
             else:
                 num_images = 0
 
-            # Only call vision encoder if we have images
+            # Only call vision encoder if we have actual images
             if num_images > 0:
-                # Expand 4D to 5D if needed
-                if ndim == 4:
-                    images = ops.expand_dims(images, axis=0)
-                    if (
-                        vision_mask is not None
-                        and len(ops.shape(vision_mask)) == 1
-                    ):
-                        vision_mask = ops.expand_dims(vision_mask, axis=0)
-                    if (
-                        vision_indices is not None
-                        and len(ops.shape(vision_indices)) == 1
-                    ):
-                        vision_indices = ops.expand_dims(vision_indices, axis=0)
                 img_embeddings = self.backbone.vision_encoder(images)
 
         # If no images processed, set masks to None
