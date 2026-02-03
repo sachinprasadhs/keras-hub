@@ -250,34 +250,45 @@ class Gemma3CausalLM(CausalLM):
             inputs.get("vision_indices", None),
         )
 
-        # Handle shape expansion for unbatched inputs.
-        # Images can be: [batch, num_images, H, W, C] or [num_images, H, W, C]
-        # For text-only: [batch, 0, H, W, C] or [0, H, W, C]
-        if images is not None and len(ops.shape(images)) == 4:
-            images = ops.expand_dims(images, axis=0)
-            # Also expand vision_mask and vision_indices if they exist
-            if vision_mask is not None and len(ops.shape(vision_mask)) == 1:
-                vision_mask = ops.expand_dims(vision_mask, axis=0)
-            if (
-                vision_indices is not None
-                and len(ops.shape(vision_indices)) == 1
-            ):
-                vision_indices = ops.expand_dims(vision_indices, axis=0)
+        # Check if we have actual images before any processing
+        # Text-only inputs: [0, H, W, C] (4D) or [batch, 0, H, W, C] (5D)
+        # Empty image batches have 0 in the num_images dimension
+        img_embeddings = None
 
-        # Check if we have actual images to process
-        # Shape after expansion is [batch, num_images, H, W, C]
-        # For text-only, num_images dimension is 0
-        has_images = (
+        if (
             not self.backbone.text_only_model
             and images is not None
             and ops.size(images) > 0
-            and ops.shape(images)[1] > 0
-        )
+        ):
+            # Check the shape to find where the num_images dimension is
+            image_shape = ops.shape(images)
+            ndim = len(image_shape)
 
-        if has_images:
-            img_embeddings = self.backbone.vision_encoder(images)
-        else:
-            img_embeddings = None
+            # For 4D: [num_images, H, W, C] - check first dimension
+            # For 5D: [batch, num_images, H, W, C] - check second dimension
+            if ndim == 4:
+                has_images = image_shape[0] > 0
+                if has_images:
+                    # Expand to 5D: [batch, num_images, H, W, C]
+                    images = ops.expand_dims(images, axis=0)
+                    if (
+                        vision_mask is not None
+                        and len(ops.shape(vision_mask)) == 1
+                    ):
+                        vision_mask = ops.expand_dims(vision_mask, axis=0)
+                    if (
+                        vision_indices is not None
+                        and len(ops.shape(vision_indices)) == 1
+                    ):
+                        vision_indices = ops.expand_dims(vision_indices, axis=0)
+                    img_embeddings = self.backbone.vision_encoder(images)
+            elif ndim == 5:
+                has_images = image_shape[1] > 0
+                if has_images:
+                    img_embeddings = self.backbone.vision_encoder(images)
+
+        # If no images, set masks to None
+        if img_embeddings is None:
             vision_mask = None
             vision_indices = None
 
