@@ -250,30 +250,27 @@ class Gemma3CausalLM(CausalLM):
             inputs.get("vision_indices", None),
         )
 
-        # Initialize to None for all code paths
-        img_embeddings = None
-
-        if (
-            not self.backbone.text_only_model
-            and images is not None
-            and ops.size(images) > 0
-        ):
-            # Handle an unbatched image. Unlike `token_ids` and
-            # `padding_mask`, this will not automatically be upranked.
+        # Handle shape expansion for unbatched inputs
+        if images is not None:
             if len(ops.shape(images)) == 4:
                 images = ops.expand_dims(images, axis=0)
             if len(ops.shape(vision_mask)) == 1:
                 vision_mask = ops.expand_dims(vision_mask, axis=0)
             if len(ops.shape(vision_indices)) == 1:
                 vision_indices = ops.expand_dims(vision_indices, axis=0)
-            # Check if we have images (2nd dim > 0) after expansion
-            # Shape is [batch, num_images, height, width, channels]
-            if ops.shape(images)[1] > 0:
-                img_embeddings = self.backbone.vision_encoder(images)
-            else:
-                vision_mask = None
-                vision_indices = None
+
+        # Process images if we have a vision model with actual images
+        has_images = (
+            not self.backbone.text_only_model
+            and images is not None
+            and ops.size(images) > 0
+            and ops.shape(images)[1] > 0
+        )
+
+        if has_images:
+            img_embeddings = self.backbone.vision_encoder(images)
         else:
+            img_embeddings = None
             vision_mask = None
             vision_indices = None
 
@@ -285,8 +282,6 @@ class Gemma3CausalLM(CausalLM):
             padding_mask,
             vision_indices,
         )
-
-        # Compute the lengths of all user inputted tokens ids.
         row_lengths = ops.sum(ops.cast(padding_mask, "int32"), axis=-1)
         # Start at the first index that has no user inputted id.
         index = ops.min(row_lengths)
