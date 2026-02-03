@@ -250,6 +250,9 @@ class Gemma3CausalLM(CausalLM):
             inputs.get("vision_indices", None),
         )
 
+        # Initialize to None for all code paths
+        img_embeddings = None
+
         if (
             not self.backbone.text_only_model
             and images is not None
@@ -268,11 +271,9 @@ class Gemma3CausalLM(CausalLM):
             if ops.shape(images)[1] > 0:
                 img_embeddings = self.backbone.vision_encoder(images)
             else:
-                img_embeddings = None
                 vision_mask = None
                 vision_indices = None
         else:
-            img_embeddings = None
             vision_mask = None
             vision_indices = None
 
