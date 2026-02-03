@@ -227,6 +227,58 @@ class Gemma3CausalLM(CausalLM):
         )
         return hidden_states, cache
 
+    def _process_images_for_generation(
+        self, images, vision_mask, vision_indices
+    ):
+        """Process images for generation, handling empty batches.
+
+        Returns:
+            img_embeddings: Vision embeddings or None
+            vision_mask: Vision attention mask or None
+            vision_indices: Vision interleave indices or None
+        """
+        img_embeddings = None
+
+        # Only process images if we have a vision model and non-empty images
+        should_process_images = (
+            not self.backbone.text_only_model
+            and images is not None
+            and ops.size(images) > 0
+        )
+
+        if should_process_images:
+            # Get image shape and determine num_images
+            image_shape = ops.shape(images)
+            ndim = len(image_shape)
+
+            # Determine num_images based on dimensionality
+            if ndim == 4:
+                num_images = image_shape[0]
+                # Expand 4D to 5D
+                images = ops.expand_dims(images, axis=0)
+                if vision_mask is not None and len(ops.shape(vision_mask)) == 1:
+                    vision_mask = ops.expand_dims(vision_mask, axis=0)
+                if (
+                    vision_indices is not None
+                    and len(ops.shape(vision_indices)) == 1
+                ):
+                    vision_indices = ops.expand_dims(vision_indices, axis=0)
+            elif ndim == 5:
+                num_images = image_shape[1]
+            else:
+                num_images = 0
+
+            # Only call vision encoder if we have actual images
+            if num_images > 0:
+                img_embeddings = self.backbone.vision_encoder(images)
+
+        # If no images processed, set masks to None
+        if img_embeddings is None:
+            vision_mask = None
+            vision_indices = None
+
+        return img_embeddings, vision_mask, vision_indices
+
     def generate_step(self, inputs, stop_token_ids=[106]):
         """A compilable generation function for a single batch of inputs.
 
@@ -250,50 +302,12 @@ class Gemma3CausalLM(CausalLM):
             inputs.get("vision_indices", None),
         )
 
-        # Check if we have actual images before any processing
-        # Text-only inputs: [0, H, W, C] (4D) or [batch, 0, H, W, C] (5D)
-        # Empty image batches have 0 in the num_images dimension
-
-        # Initialize img_embeddings, must be set in all code paths for AutoGraph
-        img_embeddings = None
-
-        # Only process images if we have a vision model and non-empty images
-        should_process_images = (
-            not self.backbone.text_only_model
-            and images is not None
-            and ops.size(images) > 0
+        # Process images using helper method (handles empty batches gracefully)
+        img_embeddings, vision_mask, vision_indices = (
+            self._process_images_for_generation(
+                images, vision_mask, vision_indices
+            )
         )
-
-        if should_process_images:
-            # Get image shape upfront
-            image_shape = ops.shape(images)
-            ndim = len(image_shape)
-
-            # Determine num_images based on dimensionality
-            if ndim == 4:
-                num_images = image_shape[0]
-                # Expand 4D to 5D upfront
-                images = ops.expand_dims(images, axis=0)
-                if vision_mask is not None and len(ops.shape(vision_mask)) == 1:
-                    vision_mask = ops.expand_dims(vision_mask, axis=0)
-                if (
-                    vision_indices is not None
-                    and len(ops.shape(vision_indices)) == 1
-                ):
-                    vision_indices = ops.expand_dims(vision_indices, axis=0)
-            elif ndim == 5:
-                num_images = image_shape[1]
-            else:
-                num_images = 0
-
-            # Only call vision encoder if we have actual images
-            if num_images > 0:
-                img_embeddings = self.backbone.vision_encoder(images)
-
-        # If no images processed, set masks to None
-        if img_embeddings is None:
-            vision_mask = None
-            vision_indices = None
 
         hidden_states, cache = self._build_cache(
             token_ids,
