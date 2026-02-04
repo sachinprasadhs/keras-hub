@@ -396,11 +396,16 @@ class Gemma3CausalLM(CausalLM):
         else:
             # Without early stopping, all locations will have been updated.
             padding_mask = ops.ones_like(token_ids, dtype="bool")
-        return {
+
+        output = {
             "token_ids": token_ids,
             "padding_mask": padding_mask,
-            "images": images,
         }
+        # Only include images if they were provided
+        if images is not None:
+            output["images"] = images
+
+        return output
 
     def generate(
         self,

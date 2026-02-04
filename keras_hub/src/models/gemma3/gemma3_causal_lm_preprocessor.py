@@ -605,28 +605,8 @@ class Gemma3CausalLMPreprocessor(CausalLMPreprocessor):
 
         # === Vision processing ===
 
-        batch_size = tf.shape(prompts)[0]
-        desired_height = self.image_converter.image_size[0]
-        desired_width = self.image_converter.image_size[1]
         if images is None:
             # == Branch: vision model, with `None` value for `images` ==
-
-            # To handle the text-only input case, we need to pass an empty
-            # tensor so as to skip the vision layers of the model.
-
-            # TODO: Once functional models accept `None` inputs, consider
-            # passing this as `None` directly.
-            images = tf.ones(
-                shape=[
-                    batch_size,
-                    0,
-                    desired_height,
-                    desired_width,
-                    3,
-                ],
-                dtype="float32",
-            )
-
             vision_mask = tf.zeros_like(token_ids, dtype=bool)
 
             return self._format_output(
@@ -681,14 +661,9 @@ class Gemma3CausalLMPreprocessor(CausalLMPreprocessor):
         # Extract inputs.
         if isinstance(x, dict):
             images = x.get("images", None)
-
-            # TODO: do we even need `responses` for generation? Makes sense for
-            # finetuning only (i.e., `call()`).
-            responses = x.get("responses", None)
             prompts = x["prompts"]
         else:
             images = None
-            responses = None
             prompts = x
 
         # Find out if the input is batched/not batched. Uprank if not batched.
@@ -759,28 +734,8 @@ class Gemma3CausalLMPreprocessor(CausalLMPreprocessor):
 
         # === Vision processing ===
 
-        batch_size = tf.shape(prompts)[0]
-        desired_height = self.image_converter.image_size[0]
-        desired_width = self.image_converter.image_size[1]
         if images is None:
             # == Branch: vision model, with `None` value for `images` ==
-
-            # To handle the text-only input case, we need to pass an empty
-            # tensor so as to skip the vision layers of the model.
-
-            # TODO: Once functional models accept `None` inputs, consider
-            # passing this as `None` directly.
-            images = tf.ones(
-                shape=[
-                    batch_size,
-                    0,
-                    desired_height,
-                    desired_width,
-                    3,
-                ],
-                dtype="float32",
-            )
-
             vision_mask = tf.zeros_like(token_ids, dtype=bool)
 
             return self._format_output(

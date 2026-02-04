@@ -297,38 +297,18 @@ class Gemma3Backbone(Backbone):
         if not text_only_model:
             image_shape = ops.shape(image_input)
             num_images = image_shape[1]
-            has_images = ops.greater(num_images, 0)
 
-            def encode_images():
-                return self.vision_encoder(image_input)
-
-            def empty_embeddings_fn():
-                return ops.zeros(
-                    (
-                        0,
-                        self.vision_encoder.num_vision_tokens_per_image,
-                        hidden_dim,
-                    ),
-                    dtype="float32",
-                )
-
-            img_embeddings = ops.cond(
-                has_images,
-                encode_images,
-                empty_embeddings_fn,
-            )
+            # Encode images with the vision encoder
+            img_embeddings = self.vision_encoder(image_input)
 
             # == Interleaving text and images ==
             # Place image embeddings in the right position in
             # `text_embeddings`.
-            def interleave():
-                return self.interleave_embeddings(
-                    image_embeddings=img_embeddings,
-                    text_embeddings=text_embeddings,
-                    vision_indices=vision_indices_input,
-                )
-
-            x = ops.cond(has_images, interleave, lambda: text_embeddings)
+            x = self.interleave_embeddings(
+                image_embeddings=img_embeddings,
+                text_embeddings=text_embeddings,
+                vision_indices=vision_indices_input,
+            )
         else:
             x = text_embeddings
 
