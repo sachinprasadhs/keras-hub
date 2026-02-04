@@ -295,9 +295,6 @@ class Gemma3Backbone(Backbone):
 
         # == Image Embeddings ==
         if not text_only_model:
-            image_shape = ops.shape(image_input)
-            num_images = image_shape[1]
-
             # Encode images with the vision encoder
             img_embeddings = self.vision_encoder(image_input)
 
@@ -372,6 +369,40 @@ class Gemma3Backbone(Backbone):
             )
         # Also, the `text_only_model`.
         self.text_only_model = text_only_model
+
+    def call(self, inputs, training=None, mask=None):
+        """Override call to handle empty image batches."""
+        # For multimodal models, check if images batch is empty
+        if not self.text_only_model and "images" in inputs:
+            images = inputs["images"]
+            if ops.ndim(images) >= 2:
+                num_images = ops.shape(images)[1]
+                has_images = ops.greater(num_images, 0)
+
+                # If no images, create inputs without images for text-only path
+                if not has_images:
+                    text_only_inputs = {
+                        "token_ids": inputs["token_ids"],
+                        "padding_mask": inputs["padding_mask"],
+                    }
+                    # Get text embeddings
+                    token_ids = text_only_inputs["token_ids"]
+                    padding_mask = text_only_inputs["padding_mask"]
+
+                    # Embed tokens
+                    x = self.token_embedding(token_ids)
+                    x = x * ops.cast(ops.sqrt(self.hidden_dim), x.dtype)
+
+                    # Run through transformer layers
+                    for transformer_layer in self.transformer_layers:
+                        x = transformer_layer(x, padding_mask=padding_mask)
+
+                    # Final normalization
+                    x = self.layer_norm(x)
+                    return x
+
+        # Default: call the functional model
+        return super().call(inputs, training=training, mask=mask)
 
     def get_config(self):
         config = super().get_config()

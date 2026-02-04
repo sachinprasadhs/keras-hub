@@ -42,9 +42,20 @@ class Gemma3InterleaveEmbeddings(keras.layers.Layer):
         """
 
         batch_size, seq_length, embedding_dim = ops.shape(text_embeddings)
-        # `num_images` will be 0 for text only inputs, and
-        # `batch_size * max_images_per_prompt` if images are passed.
-        num_images = ops.shape(image_embeddings)[0]
+
+        # Check if we have any images - check dimension directly
+        # For text-only: image_embeddings has shape (batch, 0, dim)
+        # We need the actual dimension value, not a tensor
+        image_embed_shape = ops.shape(image_embeddings)
+        num_vision_tokens_in_batch = (
+            image_embed_shape[1]
+            if ops.ndim(image_embeddings) >= 2
+            else image_embed_shape[0]
+        )
+
+        # For text-only case, operations work with empty tensors.
+        # When num_vision_tokens_in_batch=0, reshape (batch,0,dim)->(0,dim)
+        # and scatter_update with empty updates returns input unchanged.
 
         # Flatten text embeddings, image embeddings and indices.
         flat_text_embeddings = ops.reshape(
@@ -52,12 +63,10 @@ class Gemma3InterleaveEmbeddings(keras.layers.Layer):
         )
         # `flat_image_embeddings` is the `updates` tensor and should be of shape
         # `(num_updates, embedding_dim)`.
+        # This reshape will work even with empty tensors: (1, 0, 16) -> (0, 16)
         flat_image_embeddings = ops.reshape(
             image_embeddings,
-            (
-                num_images * self.num_vision_tokens_per_image,
-                embedding_dim,
-            ),
+            (num_vision_tokens_in_batch, embedding_dim),
         )
 
         # For vision indices, we need to add values such that the indices
@@ -66,13 +75,13 @@ class Gemma3InterleaveEmbeddings(keras.layers.Layer):
             keras.ops.arange(batch_size, dtype="int32"), seq_length
         )
         to_add = ops.cast(ops.expand_dims(to_add, axis=-1), "int32")
-        vision_indices = ops.add(vision_indices, to_add)
+        vision_indices_adjusted = ops.add(vision_indices, to_add)
 
         # indices should be of shape `(num_updates, 1)`. `num_updates` is
         # how many vision tokens there are to update.
-        vision_indices_shape = ops.shape(vision_indices)
+        vision_indices_shape = ops.shape(vision_indices_adjusted)
         flat_vision_indices = ops.reshape(
-            vision_indices,
+            vision_indices_adjusted,
             (vision_indices_shape[0] * vision_indices_shape[1], 1),
         )
         indices = ops.cast(flat_vision_indices, "int32")

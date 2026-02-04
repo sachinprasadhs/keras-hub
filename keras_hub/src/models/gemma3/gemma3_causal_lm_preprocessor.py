@@ -605,8 +605,23 @@ class Gemma3CausalLMPreprocessor(CausalLMPreprocessor):
 
         # === Vision processing ===
 
+        batch_size = tf.shape(prompts)[0]
+        desired_height = self.image_converter.image_size[0]
+        desired_width = self.image_converter.image_size[1]
         if images is None:
             # == Branch: vision model, with `None` value for `images` ==
+            # Pass empty tensor to skip vision layers
+            images = tf.ones(
+                shape=[
+                    batch_size,
+                    0,
+                    desired_height,
+                    desired_width,
+                    3,
+                ],
+                dtype="float32",
+            )
+
             vision_mask = tf.zeros_like(token_ids, dtype=bool)
 
             return self._format_output(
@@ -736,8 +751,23 @@ class Gemma3CausalLMPreprocessor(CausalLMPreprocessor):
 
         # === Vision processing ===
 
+        batch_size = tf.shape(prompts)[0]
+        desired_height = self.image_converter.image_size[0]
+        desired_width = self.image_converter.image_size[1]
         if images is None:
             # == Branch: vision model, with `None` value for `images` ==
+            # Pass empty tensor to skip vision layers
+            images = tf.ones(
+                shape=[
+                    batch_size,
+                    0,
+                    desired_height,
+                    desired_width,
+                    3,
+                ],
+                dtype="float32",
+            )
+
             vision_mask = tf.zeros_like(token_ids, dtype=bool)
 
             return self._format_output(

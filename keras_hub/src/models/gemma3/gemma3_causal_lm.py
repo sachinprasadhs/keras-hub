@@ -179,17 +179,13 @@ class Gemma3CausalLM(CausalLM):
             else:
                 x = text_embeddings
         else:
-            # Only define interleave function if the model has interleave_embeddings
+            # Call interleave_embeddings - it handles empty images
             if hasattr(self.backbone, "interleave_embeddings"):
-
-                def interleave():
-                    return self.backbone.interleave_embeddings(
-                        image_embeddings=img_embeddings,
-                        text_embeddings=text_embeddings,
-                        vision_indices=vision_indices,
-                    )
-
-                x = ops.cond(has_images, interleave, lambda: text_embeddings)
+                x = self.backbone.interleave_embeddings(
+                    image_embeddings=img_embeddings,
+                    text_embeddings=text_embeddings,
+                    vision_indices=vision_indices,
+                )
             else:
                 # Text-only model, no interleaving needed
                 x = text_embeddings
@@ -256,11 +252,8 @@ class Gemma3CausalLM(CausalLM):
             vision_mask: Vision attention mask or None
             vision_indices: Vision interleave indices or None
         """
-        num_vision_tokens = getattr(
-            self.backbone, "num_vision_tokens_per_image", 0
-        )
         empty_embeddings = ops.zeros(
-            (0, num_vision_tokens, self.backbone.hidden_dim),
+            (batch_size, 0, self.backbone.hidden_dim),
             dtype=self.compute_dtype,
         )
         empty_indices = ops.zeros((batch_size, 0), dtype="int32")
@@ -291,12 +284,37 @@ class Gemma3CausalLM(CausalLM):
         else:
             num_images = 0
 
-        def encode_images():
-            return self.backbone.vision_encoder(images)
-
         has_images = ops.greater(num_images, 0)
+
+        # For empty batch, return empty embeddings
+        def encode_with_padding():
+            # Pad input to avoid Conv2D error, then slice output
+            batch_dim = image_shape[0]
+            # Pad num_images dim: add 1 dummy image for tracing
+            images_padded = ops.concatenate(
+                [
+                    images,
+                    ops.zeros(
+                        (
+                            batch_dim,
+                            1,
+                            image_shape[2],
+                            image_shape[3],
+                            image_shape[4],
+                        ),
+                        dtype=images.dtype,
+                    ),
+                ],
+                axis=1,
+            )
+            # Encode with shape [batch, num_images+1, H, W, C]
+            img_embeddings_full = self.backbone.vision_encoder(images_padded)
+            # Slice to actual size [batch, num_images, ...]
+            return img_embeddings_full[:, :num_images]
+
+        # Use cond to avoid empty input during tracing
         img_embeddings = ops.cond(
-            has_images, encode_images, lambda: empty_embeddings
+            has_images, encode_with_padding, lambda: empty_embeddings
         )
 
         if vision_indices is None:
