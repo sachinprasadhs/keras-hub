@@ -179,15 +179,20 @@ class Gemma3CausalLM(CausalLM):
             else:
                 x = text_embeddings
         else:
+            # Only define interleave function if the model has interleave_embeddings
+            if hasattr(self.backbone, "interleave_embeddings"):
 
-            def interleave():
-                return self.backbone.interleave_embeddings(
-                    image_embeddings=img_embeddings,
-                    text_embeddings=text_embeddings,
-                    vision_indices=vision_indices,
-                )
+                def interleave():
+                    return self.backbone.interleave_embeddings(
+                        image_embeddings=img_embeddings,
+                        text_embeddings=text_embeddings,
+                        vision_indices=vision_indices,
+                    )
 
-            x = ops.cond(has_images, interleave, lambda: text_embeddings)
+                x = ops.cond(has_images, interleave, lambda: text_embeddings)
+            else:
+                # Text-only model, no interleaving needed
+                x = text_embeddings
 
         # Each decoder layer has a cache; we update them separately.
         caches = []
