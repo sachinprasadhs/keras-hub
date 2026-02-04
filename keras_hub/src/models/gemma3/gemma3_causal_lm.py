@@ -135,6 +135,7 @@ class Gemma3CausalLM(CausalLM):
         padding_mask=None,
         vision_indices=None,
         cache_update_mask=None,
+        has_images=None,
     ):
         """Forward pass of `Gemma3CausalLM` with cache.
 
@@ -168,14 +169,25 @@ class Gemma3CausalLM(CausalLM):
         # Interleaving logic.
         ## == Interleaving text and images ==
         # Place the image embeddings in the right position in `text_embeddings`.
-        if img_embeddings is not None:
-            x = self.backbone.interleave_embeddings(
-                image_embeddings=img_embeddings,
-                text_embeddings=text_embeddings,
-                vision_indices=vision_indices,
-            )
+        if has_images is None:
+            if img_embeddings is not None:
+                x = self.backbone.interleave_embeddings(
+                    image_embeddings=img_embeddings,
+                    text_embeddings=text_embeddings,
+                    vision_indices=vision_indices,
+                )
+            else:
+                x = text_embeddings
         else:
-            x = text_embeddings
+
+            def interleave():
+                return self.backbone.interleave_embeddings(
+                    image_embeddings=img_embeddings,
+                    text_embeddings=text_embeddings,
+                    vision_indices=vision_indices,
+                )
+
+            x = ops.cond(has_images, interleave, lambda: text_embeddings)
 
         # Each decoder layer has a cache; we update them separately.
         caches = []
@@ -202,6 +214,7 @@ class Gemma3CausalLM(CausalLM):
         vision_mask,
         padding_mask,
         vision_indices,
+        has_images=None,
     ):
         """Build an empty cache for use with `call_with_cache()`."""
         batch_size = ops.shape(token_ids)[0]
@@ -224,11 +237,12 @@ class Gemma3CausalLM(CausalLM):
             padding_mask=padding_mask,
             vision_indices=vision_indices,
             cache_update_mask=None,
+            has_images=has_images,
         )
         return hidden_states, cache
 
     def _process_images_for_generation(
-        self, images, vision_mask, vision_indices
+        self, images, vision_mask, vision_indices, batch_size
     ):
         """Process images for generation, handling empty batches.
 
@@ -237,47 +251,53 @@ class Gemma3CausalLM(CausalLM):
             vision_mask: Vision attention mask or None
             vision_indices: Vision interleave indices or None
         """
-        img_embeddings = None
+        num_vision_tokens = getattr(
+            self.backbone, "num_vision_tokens_per_image", 0
+        )
+        empty_embeddings = ops.zeros(
+            (0, num_vision_tokens, self.backbone.hidden_dim),
+            dtype=self.compute_dtype,
+        )
+        empty_indices = ops.zeros((batch_size, 0), dtype="int32")
 
-        # Only process images if we have a vision model and non-empty images
-        should_process_images = (
-            not self.backbone.text_only_model
-            and images is not None
-            and ops.size(images) > 0
+        if self.backbone.text_only_model or images is None:
+            return (
+                empty_embeddings,
+                None,
+                empty_indices,
+                ops.zeros((), dtype="bool"),
+            )
+
+        # Get image shape and determine num_images
+        image_shape = ops.shape(images)
+        ndim = ops.ndim(images)
+
+        # Determine num_images based on dimensionality
+        if ndim == 4:
+            num_images = image_shape[0]
+            # Expand 4D to 5D
+            images = ops.expand_dims(images, axis=0)
+            if vision_mask is not None and ops.ndim(vision_mask) == 1:
+                vision_mask = ops.expand_dims(vision_mask, axis=0)
+            if vision_indices is not None and ops.ndim(vision_indices) == 1:
+                vision_indices = ops.expand_dims(vision_indices, axis=0)
+        elif ndim == 5:
+            num_images = image_shape[1]
+        else:
+            num_images = 0
+
+        def encode_images():
+            return self.backbone.vision_encoder(images)
+
+        has_images = ops.greater(num_images, 0)
+        img_embeddings = ops.cond(
+            has_images, encode_images, lambda: empty_embeddings
         )
 
-        if should_process_images:
-            # Get image shape and determine num_images
-            image_shape = ops.shape(images)
-            ndim = len(image_shape)
+        if vision_indices is None:
+            vision_indices = empty_indices
 
-            # Determine num_images based on dimensionality
-            if ndim == 4:
-                num_images = image_shape[0]
-                # Expand 4D to 5D
-                images = ops.expand_dims(images, axis=0)
-                if vision_mask is not None and len(ops.shape(vision_mask)) == 1:
-                    vision_mask = ops.expand_dims(vision_mask, axis=0)
-                if (
-                    vision_indices is not None
-                    and len(ops.shape(vision_indices)) == 1
-                ):
-                    vision_indices = ops.expand_dims(vision_indices, axis=0)
-            elif ndim == 5:
-                num_images = image_shape[1]
-            else:
-                num_images = 0
-
-            # Only call vision encoder if we have actual images
-            if num_images > 0:
-                img_embeddings = self.backbone.vision_encoder(images)
-
-        # If no images processed, set masks to None
-        if img_embeddings is None:
-            vision_mask = None
-            vision_indices = None
-
-        return img_embeddings, vision_mask, vision_indices
+        return img_embeddings, vision_mask, vision_indices, has_images
 
     def generate_step(self, inputs, stop_token_ids=[106]):
         """A compilable generation function for a single batch of inputs.
@@ -302,10 +322,12 @@ class Gemma3CausalLM(CausalLM):
             inputs.get("vision_indices", None),
         )
 
+        batch_size = ops.shape(token_ids)[0]
+
         # Process images using helper method (handles empty batches gracefully)
-        img_embeddings, vision_mask, vision_indices = (
+        img_embeddings, vision_mask, vision_indices, has_images = (
             self._process_images_for_generation(
-                images, vision_mask, vision_indices
+                images, vision_mask, vision_indices, batch_size
             )
         )
 
@@ -315,6 +337,7 @@ class Gemma3CausalLM(CausalLM):
             vision_mask,
             padding_mask,
             vision_indices,
+            has_images=has_images,
         )
         row_lengths = ops.sum(ops.cast(padding_mask, "int32"), axis=-1)
         # Start at the first index that has no user inputted id.
