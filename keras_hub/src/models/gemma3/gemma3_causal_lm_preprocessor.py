@@ -661,9 +661,11 @@ class Gemma3CausalLMPreprocessor(CausalLMPreprocessor):
         # Extract inputs.
         if isinstance(x, dict):
             images = x.get("images", None)
+            responses = x.get("responses", None)
             prompts = x["prompts"]
         else:
             images = None
+            responses = None
             prompts = x
 
         # Find out if the input is batched/not batched. Uprank if not batched.
