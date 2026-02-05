@@ -371,37 +371,36 @@ class Gemma3Backbone(Backbone):
         self.text_only_model = text_only_model
 
     def call(self, inputs, training=None, mask=None):
-        """Override call to handle empty image batches."""
-        # For multimodal models, check if images batch is empty
+        """Override call to pad empty image batches."""
+        # Handle empty image batches by padding before processing
         if not self.text_only_model and "images" in inputs:
             images = inputs["images"]
+            image_shape = ops.shape(images)
             if ops.ndim(images) >= 2:
-                num_images = ops.shape(images)[1]
-                has_images = ops.greater(num_images, 0)
+                # Always pad to ensure at least 1 image
+                # Shape: (batch, N, H, W, C) -> (batch, N+1, H, W, C)
+                batch_dim = image_shape[0]
+                images_padded = ops.concatenate(
+                    [
+                        images,
+                        ops.zeros(
+                            (
+                                batch_dim,
+                                1,
+                                image_shape[2],
+                                image_shape[3],
+                                image_shape[4],
+                            ),
+                            dtype=images.dtype,
+                        ),
+                    ],
+                    axis=1,
+                )
+                # Update inputs with padded images
+                inputs = dict(inputs)
+                inputs["images"] = images_padded
 
-                # If no images, create inputs without images for text-only path
-                if not has_images:
-                    text_only_inputs = {
-                        "token_ids": inputs["token_ids"],
-                        "padding_mask": inputs["padding_mask"],
-                    }
-                    # Get text embeddings
-                    token_ids = text_only_inputs["token_ids"]
-                    padding_mask = text_only_inputs["padding_mask"]
-
-                    # Embed tokens
-                    x = self.token_embedding(token_ids)
-                    x = x * ops.cast(ops.sqrt(self.hidden_dim), x.dtype)
-
-                    # Run through transformer layers
-                    for transformer_layer in self.transformer_layers:
-                        x = transformer_layer(x, padding_mask=padding_mask)
-
-                    # Final normalization
-                    x = self.layer_norm(x)
-                    return x
-
-        # Default: call the functional model
+        # Call the functional model
         return super().call(inputs, training=training, mask=mask)
 
     def get_config(self):
