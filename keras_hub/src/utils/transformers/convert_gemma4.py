@@ -43,32 +43,24 @@ def load_audio_converter_config(preset, transformers_config):
     """Return Gemma4AudioConverter kwargs, or None for text/vision models."""
     if "audio_config" not in transformers_config:
         return None
-    return {}
+        
+    processor_config = load_json(preset, "processor_config.json")
+    feature_extractor = processor_config.get("feature_extractor", {})
+    
+    # Map HF keys to KerasHub keys
+    return {
+        "num_mels": feature_extractor["feature_size"],
+        "num_fft_bins": feature_extractor["fft_length"],
+        "stride": feature_extractor["hop_length"],
+        "sampling_rate": feature_extractor["sampling_rate"],
+        "frame_length": feature_extractor["frame_length"],
+        "max_frequency": feature_extractor["max_frequency"],
+        "min_frequency": feature_extractor["min_frequency"],
+        "mel_floor": feature_extractor["mel_floor"],
+    }
 
 
-def load_preprocessor_config(preset, transformers_config):
-    """Return extra kwargs for Gemma4CausalLMPreprocessor from HF config.
 
-    For audio-capable models (E2B/E4B), this wires `audio_input_feat_size`
-    from the HF `audio_config` into the preprocessor so that it emits the
-    correct audio dummy keys expected by the backbone.
-    """
-    config = {}
-    if "vision_config" in transformers_config:
-        vis_cfg = transformers_config["vision_config"]
-        # Use the authoritative token count from the config rather than
-        # recomputing it from image_size (which may not be present and
-        # differs per-image for dynamic-resolution models).
-        config["num_vision_tokens_per_image"] = vis_cfg["default_output_length"]
-
-    audio_cfg = transformers_config.get("audio_config")
-    if audio_cfg is not None:
-        config["audio_input_feat_size"] = audio_cfg.get("input_feat_size", 128)
-        config["num_audio_tokens_per_clip"] = audio_cfg.get(
-            "num_audio_tokens_per_clip",
-            750 // audio_cfg.get("reduction_factor", 1),
-        )
-    return config
 
 
 def convert_backbone_config(transformers_config):
@@ -118,51 +110,25 @@ def convert_backbone_config(transformers_config):
         # Audio encoder — key may be present but null for vision-only models.
         if transformers_config.get("audio_config") is not None:
             aud_cfg = transformers_config["audio_config"]
-            output_proj_dims = aud_cfg.get("output_proj_dims", 1536)
             audio_encoder = Gemma4AudioEncoder(
-                input_feat_size=aud_cfg.get("input_feat_size", 128),
-                hidden_size=aud_cfg.get("hidden_size", 1024),
-                num_heads=aud_cfg.get("num_attention_heads", 8),
-                num_layers=aud_cfg.get("num_hidden_layers", 12),
-                chunk_size=aud_cfg.get("attention_chunk_size", 12),
-                context_left=aud_cfg.get("attention_context_left", 13),
-                context_right=aud_cfg.get("attention_context_right", 0),
-                logit_cap=aud_cfg.get("attention_logit_cap", 50.0),
-                invalid_logit_value=aud_cfg.get(
-                    "attention_invalid_logits_value", -1e9
-                ),
-                conv_kernel_size=aud_cfg.get("conv_kernel_size", 5),
-                reduction_factor=aud_cfg.get("reduction_factor", 1),
-                residual_weight=aud_cfg.get("residual_weight", 0.5),
-                gradient_clipping=aud_cfg.get("gradient_clipping", 1e10),
-                sscp_conv_channels=tuple(
-                    aud_cfg.get("subsampling_conv_channels", (128, 32))
-                ),
-                sscp_kernel_sizes=tuple(
-                    tuple(k)
-                    for k in aud_cfg.get(
-                        "sscp_conv_kernel_size", ((3, 3), (3, 3))
-                    )
-                ),
-                sscp_stride_sizes=tuple(
-                    tuple(s)
-                    for s in aud_cfg.get(
-                        "sscp_conv_stride_size", ((2, 2), (2, 2))
-                    )
-                ),
-                output_proj_dims=output_proj_dims,
+                hidden_size=aud_cfg["hidden_size"],
+                num_heads=aud_cfg["num_attention_heads"],
+                num_layers=aud_cfg["num_hidden_layers"],
+                chunk_size=aud_cfg["attention_chunk_size"],
+                context_left=aud_cfg["attention_context_left"],
+                context_right=aud_cfg["attention_context_right"],
+                logit_cap=aud_cfg["attention_logit_cap"],
+                invalid_logit_value=aud_cfg["attention_invalid_logits_value"],
+                conv_kernel_size=aud_cfg["conv_kernel_size"],
+                residual_weight=aud_cfg["residual_weight"],
+                gradient_clipping=aud_cfg["gradient_clipping"],
+                sscp_conv_channels=tuple(aud_cfg["subsampling_conv_channels"]),
+                output_proj_dims=aud_cfg["output_proj_dims"],
                 output_dim=text_cfg["hidden_size"],
-                norm_eps=aud_cfg.get("rms_norm_eps", 1e-6),
-                # HF uses rms_norm_eps for the SSCP LayerNorm too; there is
-                # no separate sscp_conv_eps field in Gemma4AudioConfig.
-                sscp_norm_eps=aud_cfg.get(
-                    "sscp_conv_eps", aud_cfg.get("rms_norm_eps", 1e-6)
-                ),
+                norm_eps=aud_cfg["rms_norm_eps"],
+                sscp_norm_eps=aud_cfg["rms_norm_eps"],
             )
-            num_audio_tokens_per_clip = aud_cfg.get(
-                "num_audio_tokens_per_clip",
-                750 // aud_cfg.get("reduction_factor", 1),
-            )
+            num_audio_tokens_per_clip = aud_cfg.get("num_audio_tokens_per_clip")
         else:
             audio_encoder = None
             num_audio_tokens_per_clip = None
@@ -334,6 +300,16 @@ def _convert_audio_encoder(audio_encoder, loader, transformers_config):
     aud_prefix = "model.audio_tower"
     sscp = audio_encoder.subsample_conv_projection
 
+    def port_clips(keras_layer, hf_name):
+        if not getattr(keras_layer, "use_clipped_linears", False):
+            return
+        for w in ["input_min", "input_max", "output_min", "output_max"]:
+            loader.port_weight(
+                keras_variable=getattr(keras_layer, w),
+                hf_weight_key=f"{hf_name}.{w}",
+            )
+
+
     for conv_block, hf_attr in [
         (sscp.conv_0, "layer0"),
         (sscp.conv_1, "layer1"),
@@ -363,15 +339,19 @@ def _convert_audio_encoder(audio_encoder, loader, transformers_config):
             ("feed_forward2", block.ffw_end),
         ]:
             loader.port_weight(
-                keras_variable=keras_ffw.ffw_1.kernel,
+                keras_variable=keras_ffw.ffw_1.dense.kernel,
                 hf_weight_key=f"{hf_blk}.{hf_ffw_name}.ffw_layer_1.linear.weight",
                 hook_fn=lambda x, _: np.transpose(x),
             )
+
             loader.port_weight(
-                keras_variable=keras_ffw.ffw_2.kernel,
+                keras_variable=keras_ffw.ffw_2.dense.kernel,
                 hf_weight_key=f"{hf_blk}.{hf_ffw_name}.ffw_layer_2.linear.weight",
                 hook_fn=lambda x, _: np.transpose(x),
             )
+
+            port_clips(keras_ffw.ffw_1, f"{hf_blk}.{hf_ffw_name}.ffw_layer_1")
+            port_clips(keras_ffw.ffw_2, f"{hf_blk}.{hf_ffw_name}.ffw_layer_2")
 
         attn = block.attention.attn
         hf_attn = f"{hf_blk}.self_attn"
@@ -381,10 +361,13 @@ def _convert_audio_encoder(audio_encoder, loader, transformers_config):
             ("v_proj", attn.v_proj),
         ]:
             loader.port_weight(
-                keras_variable=keras_dense.kernel,
+                keras_variable=keras_dense.dense.kernel,
                 hf_weight_key=f"{hf_attn}.{proj_name}.linear.weight",
                 hook_fn=lambda x, _: np.transpose(x),
             )
+            port_clips(keras_dense, f"{hf_attn}.{proj_name}")
+
+
 
         loader.port_weight(
             keras_variable=attn.per_dim_scale,
@@ -396,28 +379,37 @@ def _convert_audio_encoder(audio_encoder, loader, transformers_config):
             hook_fn=lambda x, _: np.transpose(x),
         )
         loader.port_weight(
-            keras_variable=block.attention.out_proj.kernel,
+            keras_variable=block.attention.out_proj.dense.kernel,
             hf_weight_key=f"{hf_blk}.self_attn.post.linear.weight",
             hook_fn=lambda x, _: np.transpose(x),
         )
+        port_clips(block.attention.out_proj, f"{hf_blk}.self_attn.post")
+
+
 
         lconv = block.lconv
         hf_lconv = f"{hf_blk}.lconv1d"
         loader.port_weight(
-            keras_variable=lconv.linear_start.kernel,
+            keras_variable=lconv.linear_start.dense.kernel,
             hf_weight_key=f"{hf_lconv}.linear_start.linear.weight",
             hook_fn=lambda x, _: np.transpose(x),
         )
+        port_clips(lconv.linear_start, f"{hf_lconv}.linear_start")
+
+
         loader.port_weight(
             keras_variable=lconv.depthwise_conv.kernel,
             hf_weight_key=f"{hf_lconv}.depthwise_conv1d.weight",
             hook_fn=lambda x, _: np.transpose(x, (2, 0, 1)),
         )
         loader.port_weight(
-            keras_variable=lconv.linear_end.kernel,
+            keras_variable=lconv.linear_end.dense.kernel,
             hf_weight_key=f"{hf_lconv}.linear_end.linear.weight",
             hook_fn=lambda x, _: np.transpose(x),
         )
+        port_clips(lconv.linear_end, f"{hf_lconv}.linear_end")
+
+
 
         for hf_ffw_name, keras_ffw in [
             ("feed_forward1", block.ffw_start),
@@ -840,7 +832,10 @@ def convert_tokenizer(cls, preset, **kwargs):
         IMAGE_PLACEHOLDER_TOKEN in vocab
         or IMAGE_PLACEHOLDER_TOKEN in added_contents
     )
-    has_audio_tokens = "<|audio|>" in vocab or "<|audio|>" in added_contents
+    has_audio_tokens = (
+        "<|audio|>" in vocab
+        or "<|audio|>" in added_contents
+    )
     return cls(
         proto=proto,
         has_vision_tokens=has_vision_tokens,

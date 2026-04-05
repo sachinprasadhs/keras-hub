@@ -50,11 +50,13 @@ class Gemma4CausalLM(CausalLM):
         self,
         preprocessor,
         backbone,
+        final_logit_cap=None,
         **kwargs,
     ):
         # === Layers ===
         self.preprocessor = preprocessor
         self.backbone = backbone
+        self.final_logit_cap = final_logit_cap
 
         # === Functional Model ===
         # This must be "backbone.input" i.e. the full input structure,
@@ -63,11 +65,17 @@ class Gemma4CausalLM(CausalLM):
         hidden_state = backbone(inputs=inputs)
         outputs = backbone.token_embedding(hidden_state, reverse=True)
 
+        if final_logit_cap is not None:
+            outputs = outputs / final_logit_cap
+            outputs = ops.tanh(outputs)
+            outputs = outputs * final_logit_cap
+
         super().__init__(
             inputs=inputs,
             outputs=outputs,
             **kwargs,
         )
+
 
     def compile(
         self,
@@ -227,13 +235,9 @@ class Gemma4CausalLM(CausalLM):
             if vision_mask is not None or audio_mask is not None:
                 mask_to_zero = ops.zeros_like(_per_layer_ids, dtype="bool")
                 if vision_mask is not None:
-                    mask_to_zero = ops.logical_or(
-                        mask_to_zero, ops.cast(vision_mask, "bool")
-                    )
+                    mask_to_zero = ops.logical_or(mask_to_zero, ops.cast(vision_mask, "bool"))
                 if audio_mask is not None:
-                    mask_to_zero = ops.logical_or(
-                        mask_to_zero, ops.cast(audio_mask, "bool")
-                    )
+                    mask_to_zero = ops.logical_or(mask_to_zero, ops.cast(audio_mask, "bool"))
                 _per_layer_ids = ops.where(
                     mask_to_zero,
                     ops.zeros_like(_per_layer_ids),
@@ -297,7 +301,12 @@ class Gemma4CausalLM(CausalLM):
         cache = ops.stack(caches, axis=1)
         hidden_states = x = self.backbone.layer_norm(x)
         logits = self.backbone.token_embedding(x, reverse=True)
+        if self.final_logit_cap is not None:
+            logits = logits / self.final_logit_cap
+            logits = ops.tanh(logits)
+            logits = logits * self.final_logit_cap
         return logits, hidden_states, cache
+
 
     def _build_cache(
         self,
@@ -341,6 +350,18 @@ class Gemma4CausalLM(CausalLM):
             cache_update_mask=None,
         )
         return hidden_states, cache
+
+
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "final_logit_cap": self.final_logit_cap,
+            }
+        )
+        return config
+
 
     def generate_step(self, inputs, stop_token_ids=[106]):
         """A compilable generation function for a single batch of inputs.

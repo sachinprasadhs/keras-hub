@@ -107,7 +107,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         num_vision_tokens_per_image=280,
         max_audio_clips_per_prompt=1,
         num_audio_tokens_per_clip=750,
-        audio_input_feat_size=0,
+        audio_input_feat_size=128,
         **kwargs,
     ):
         super().__init__(
@@ -249,13 +249,8 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             tf.expand_dims(to_subtract, axis=-1),
         )
 
-        # Pad the indices.
+        # Pad the indices to the max length in the batch (dynamic).
         batched_audio_indices = batched_audio_indices.to_tensor(
-            shape=[
-                batch_size,
-                self.max_audio_clips_per_prompt
-                * self.num_audio_tokens_per_clip,
-            ],
             default_value=0,
         )
         return batched_audio_indices
@@ -289,6 +284,10 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             padding_mask = padding_mask[..., :-1]
 
         batch_size = tf.shape(vision_mask)[0]
+        seq_len = tf.shape(token_ids)[-1]
+        position_ids = tf.range(seq_len, dtype=tf.int32)
+        position_ids = tf.expand_dims(position_ids, axis=0)
+        position_ids = tf.tile(position_ids, [batch_size, 1])
 
         if text_only_input:
             vision_indices = tf.ones(
@@ -320,7 +319,11 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             "padding_mask": (
                 padding_mask if batched else tf.squeeze(padding_mask, axis=0)
             ),
+            "position_ids": (
+                position_ids if batched else tf.squeeze(position_ids, axis=0)
+            ),
         }
+
 
         if audio_mel is not None:
             x["audio_mel"] = (
@@ -333,9 +336,6 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             )
             x["audio_indices"] = (
                 audio_indices if batched else tf.squeeze(audio_indices, axis=0)
-            )
-            x["audio_mask"] = (
-                audio_mask if batched else tf.squeeze(audio_mask, axis=0)
             )
         elif self.audio_input_feat_size > 0:
             audio_mel_dummy = tf.zeros(
@@ -766,6 +766,44 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
 
         if audio is not None and self.audio_converter is not None:
             audio_mel, audio_mel_mask = self._preprocess_audio(audio, batched)
+            
+            # Dynamically clip unused placeholders to remove the gap!
+            # Find the number of valid audio tokens per sample
+            # audio_mel_mask is (B, 1, Mel_Seq). Sum gives total Mel frames.
+            # Audio encoder subsamples by 4x.
+            exact_tokens = tf.reduce_sum(audio_mel_mask, axis=[1, 2]) // 4
+            
+            placeholder_id = self._audio_placeholder_id
+            
+            # Identify all audio placeholder positions.
+            is_placeholder = token_ids == placeholder_id
+            
+            # Use cumsum to rank placeholders per sample.
+            placeholder_counts = tf.cumsum(tf.cast(is_placeholder, tf.int32), axis=1)
+            placeholder_counts = tf.where(is_placeholder, placeholder_counts, 0)
+            
+            # Create a mask to keep only the first `exact_tokens` placeholders.
+            exact_tokens_expanded = tf.expand_dims(tf.cast(exact_tokens, tf.int32), axis=1)
+            is_unused = is_placeholder & (placeholder_counts > exact_tokens_expanded)
+            keep_mask = ~is_unused
+            
+            # Use tf.ragged.boolean_mask to drop unused tokens.
+            ragged_t_ids = tf.ragged.boolean_mask(token_ids, keep_mask)
+            ragged_p_mask = tf.ragged.boolean_mask(padding_mask, keep_mask)
+            
+            # Pad back to original sequence length using to_tensor.
+            batch_size = tf.shape(token_ids)[0]
+            seq_len = tf.shape(token_ids)[1]
+            
+            token_ids = ragged_t_ids.to_tensor(
+                default_value=self.tokenizer.pad_token_id,
+                shape=[batch_size, seq_len],
+            )
+            padding_mask = ragged_p_mask.to_tensor(
+                default_value=False,
+                shape=[batch_size, seq_len],
+            )
+            
             audio_mask = token_ids == self._audio_placeholder_id
             audio_indices = self._get_audio_indices(audio_mask)
 
@@ -794,16 +832,9 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
                 "num_audio_tokens_per_clip": self.num_audio_tokens_per_clip,
                 "max_audio_clips_per_prompt": self.max_audio_clips_per_prompt,
                 "audio_input_feat_size": self.audio_input_feat_size,
+                "audio_converter": self.audio_converter,
             }
         )
-        if self.image_converter:
-            config["image_converter"] = keras.layers.serialize(
-                self.image_converter
-            )
-        if self.audio_converter:
-            config["audio_converter"] = keras.layers.serialize(
-                self.audio_converter
-            )
         return config
 
     @preprocessing_function

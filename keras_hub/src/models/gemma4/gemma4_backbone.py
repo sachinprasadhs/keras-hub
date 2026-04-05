@@ -269,10 +269,7 @@ class Gemma4Backbone(Backbone):
             )
         if audio_encoder is not None:
             if num_audio_tokens_per_clip is None:
-                raise ValueError(
-                    "`num_audio_tokens_per_clip` must be provided when "
-                    "`audio_encoder` is not None."
-                )
+                num_audio_tokens_per_clip = 750
             self.audio_interleave_embeddings = Gemma4InterleaveEmbeddings(
                 num_vision_tokens_per_image=num_audio_tokens_per_clip,
                 dtype=dtype,
@@ -407,6 +404,9 @@ class Gemma4Backbone(Backbone):
             audio_indices_input = keras.Input(
                 shape=(None,), dtype="int32", name="audio_indices"
             )
+            audio_mask_input = keras.Input(
+                shape=(None,), dtype="int32", name="audio_mask"
+            )
 
         token_id_input = keras.Input(
             shape=(None,), dtype="int32", name="token_ids"
@@ -414,6 +414,10 @@ class Gemma4Backbone(Backbone):
         padding_mask_input = keras.Input(
             shape=(None,), dtype="int32", name="padding_mask"
         )
+        position_ids_input = keras.Input(
+            shape=(None,), dtype="int32", name="position_ids"
+        )
+
 
         # Text embeddings.
         text_embeddings = self.token_embedding(token_id_input)
@@ -462,6 +466,12 @@ class Gemma4Backbone(Backbone):
             if vision_encoder is not None:
                 _per_layer_ids = ops.where(
                     ops.cast(vision_mask_input, "bool"),
+                    ops.zeros_like(_per_layer_ids),
+                    _per_layer_ids,
+                )
+            if audio_encoder is not None:
+                _per_layer_ids = ops.where(
+                    ops.cast(audio_mask_input, "bool"),
                     ops.zeros_like(_per_layer_ids),
                     _per_layer_ids,
                 )
@@ -518,7 +528,9 @@ class Gemma4Backbone(Backbone):
                 ),
                 per_layer_input=per_layer_input_i,
                 shared_kv=shared_kv,
+                positions=position_ids_input,
             )
+
             shared_kv_tensors[i] = new_cache
         sequence_output = self.layer_norm(x)
 
@@ -560,7 +572,9 @@ class Gemma4Backbone(Backbone):
         inputs = {
             "token_ids": token_id_input,
             "padding_mask": padding_mask_input,
+            "position_ids": position_ids_input,
         }
+
         if vision_encoder is not None:
             inputs.update(
                 {
@@ -576,6 +590,7 @@ class Gemma4Backbone(Backbone):
                     "audio_mel": audio_mel_input,
                     "audio_mel_mask": audio_mel_mask_input,
                     "audio_indices": audio_indices_input,
+                    "audio_mask": audio_mask_input,
                 }
             )
 

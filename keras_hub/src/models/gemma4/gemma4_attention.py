@@ -177,7 +177,7 @@ class Gemma4TextAttention(keras.layers.Layer):
 
         self.built = True
 
-    def _apply_rope(self, x, start_index):
+    def _apply_rope(self, x, start_index, positions=None):
         """Apply RoPE, with optional partial (proportional) rotation.
 
         In Gemma 4, global attention uses partial proportionate rotation where
@@ -198,7 +198,9 @@ class Gemma4TextAttention(keras.layers.Layer):
             x2_nope = x2[..., half_rotary:]
 
             x_rot = ops.concatenate([x1_rot, x2_rot], axis=-1)
-            x_rot = self.rope_layer(x_rot, start_index=start_index)
+            x_rot = self.rope_layer(
+                x_rot, start_index=start_index, positions=positions
+            )
 
             x1_rot, x2_rot = ops.split(x_rot, 2, axis=-1)
 
@@ -206,7 +208,8 @@ class Gemma4TextAttention(keras.layers.Layer):
             y2 = ops.concatenate([x2_rot, x2_nope], axis=-1)
 
             return ops.concatenate([y1, y2], axis=-1)
-        return self.rope_layer(x, start_index=start_index)
+        return self.rope_layer(x, start_index=start_index, positions=positions)
+
 
     def _use_fused_attention_op(self):
         if not fused_attention_op_available():
@@ -356,10 +359,12 @@ class Gemma4TextAttention(keras.layers.Layer):
         cache_update_mask=None,
         shared_kv=None,
         training=False,
+        positions=None,
     ):
         query = self.query_dense(x)
         query = self.query_norm(query)
-        query = self._apply_rope(query, cache_update_index)
+        query = self._apply_rope(query, cache_update_index, positions=positions)
+
 
         if cache is not None:
             key_cache = cache[:, 0, ...]
@@ -375,7 +380,10 @@ class Gemma4TextAttention(keras.layers.Layer):
             else:
                 key_update = self.key_dense(x)
                 key_update = self.key_norm(key_update)
-                key_update = self._apply_rope(key_update, cache_update_index)
+                key_update = self._apply_rope(
+                    key_update, cache_update_index, positions=positions
+                )
+
                 if self.attention_k_eq_v:
                     # K=V: value projection reuses the key_dense computation.
                     value_update = self.value_norm(self.key_dense(x))
@@ -418,14 +426,19 @@ class Gemma4TextAttention(keras.layers.Layer):
                     # K=V: value projection reuses key_dense weights.
                     raw_kv = self.key_dense(x)
                     key = self.key_norm(raw_kv)
-                    key = self._apply_rope(key, cache_update_index)
+                    key = self._apply_rope(
+                        key, cache_update_index, positions=positions
+                    )
                     value = self.value_norm(raw_kv)
                 else:
                     key = self.key_dense(x)
                     key = self.key_norm(key)
-                    key = self._apply_rope(key, cache_update_index)
+                    key = self._apply_rope(
+                        key, cache_update_index, positions=positions
+                    )
                     value = self.value_dense(x)
                     value = self.value_norm(value)
+
             new_cache = ops.stack((key, value), axis=1)
 
         # When global attention layers use global_head_dim > head_dim, the

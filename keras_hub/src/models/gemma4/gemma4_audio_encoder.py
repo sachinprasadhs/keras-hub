@@ -7,6 +7,9 @@ from keras import ops
 from keras_hub.src.api_export import keras_hub_export
 from keras_hub.src.models.gemma4.gemma4_layers import Gemma4FrozenNorm
 from keras_hub.src.models.gemma4.gemma4_layers import Gemma4VNorm
+from keras_hub.src.models.gemma4.gemma4_layers import Gemma4ClippableDense
+
+
 
 
 class Gemma4AudioRelativePositionEmbedding(keras.layers.Layer):
@@ -53,9 +56,20 @@ class Gemma4AudioRelativePositionEmbedding(keras.layers.Layer):
             trainable=True,
         )
         # Precompute inverse timescales for sinusoidal position encoding.
-        # HF uses all-ones (non-persistent buffer), not log-spaced timescales.
+        # Matches HF's _init_weights for Gemma4AudioRelPositionalEncoding.
+        min_timescale = 1.0
+        max_timescale = 10000.0
         num_timescales = self.hidden_size // 2
-        self._inv_timescales = np.ones((1, 1, num_timescales), dtype="float32")
+        log_timescale_increment = math.log(max_timescale / min_timescale) / max(
+            num_timescales - 1, 1
+        )
+        inv_timescales = min_timescale * np.exp(
+            np.arange(num_timescales) * -log_timescale_increment
+        )
+        self._inv_timescales = np.reshape(
+            inv_timescales, (1, 1, num_timescales)
+        ).astype("float32")
+
 
     def build(self, input_shape):
         self.built = True
@@ -258,24 +272,25 @@ class Gemma4AudioAttention(keras.layers.Layer):
         self.k_scale = math.log(1.0 + math.e) / math.log(2.0)
 
         input_shape = (None, None, self.hidden_size)
-        self.q_proj = keras.layers.Dense(
+        self.q_proj = Gemma4ClippableDense(
             self.num_heads * self.head_dim,
             use_bias=False,
             dtype=self.dtype_policy,
             name="q_proj",
         )
-        self.k_proj = keras.layers.Dense(
+        self.k_proj = Gemma4ClippableDense(
             self.num_heads * self.head_dim,
             use_bias=False,
             dtype=self.dtype_policy,
             name="k_proj",
         )
-        self.v_proj = keras.layers.Dense(
+        self.v_proj = Gemma4ClippableDense(
             self.num_heads * self.head_dim,
             use_bias=False,
             dtype=self.dtype_policy,
             name="v_proj",
         )
+
         self.q_proj.build(input_shape)
         self.k_proj.build(input_shape)
         self.v_proj.build(input_shape)
@@ -563,12 +578,13 @@ class Gemma4AudioConformerAttention(keras.layers.Layer):
         )
         self.attn.build(input_shape)
 
-        self.out_proj = keras.layers.Dense(
+        self.out_proj = Gemma4ClippableDense(
             self.hidden_size,
             use_bias=False,
             dtype=self.dtype_policy,
             name="out_proj",
         )
+
         self.out_proj.build(input_shape)
 
         self.post_norm = Gemma4FrozenNorm(
@@ -948,7 +964,7 @@ class Gemma4AudioConformerFeedForward(keras.layers.Layer):
         )
         self.pre_norm.build(input_shape)
 
-        self.ffw_1 = keras.layers.Dense(
+        self.ffw_1 = Gemma4ClippableDense(
             self.intermediate_dim,
             use_bias=False,
             dtype=self.dtype_policy,
@@ -956,12 +972,13 @@ class Gemma4AudioConformerFeedForward(keras.layers.Layer):
         )
         self.ffw_1.build(input_shape)
 
-        self.ffw_2 = keras.layers.Dense(
+        self.ffw_2 = Gemma4ClippableDense(
             self.hidden_size,
             use_bias=False,
             dtype=self.dtype_policy,
             name="ffw_2",
         )
+
         self.ffw_2.build(input_shape[:-1] + (self.intermediate_dim,))
 
         self.post_norm = Gemma4FrozenNorm(
@@ -1044,12 +1061,13 @@ class Gemma4AudioConformerLightConv1d(keras.layers.Layer):
         )
         self.pre_norm.build(input_shape)
 
-        self.linear_start = keras.layers.Dense(
+        self.linear_start = Gemma4ClippableDense(
             self.hidden_size * 2,
             use_bias=False,
             dtype=self.dtype_policy,
             name="linear_start",
         )
+
         self.linear_start.build(input_shape)
 
         # Causal depthwise conv: (B, T, D) → (B, T, D).
@@ -1070,12 +1088,13 @@ class Gemma4AudioConformerLightConv1d(keras.layers.Layer):
         )
         self.conv_norm.build(input_shape[:-1] + (self.hidden_size,))
 
-        self.linear_end = keras.layers.Dense(
+        self.linear_end = Gemma4ClippableDense(
             self.hidden_size,
             use_bias=False,
             dtype=self.dtype_policy,
             name="linear_end",
         )
+
         self.linear_end.build(input_shape[:-1] + (self.hidden_size,))
 
     def build(self, input_shape):
@@ -1237,16 +1256,21 @@ class Gemma4AudioConformerBlock(keras.layers.Layer):
             float tensor `(B, T, D)`.
         """
         x = self.ffw_start(x)
+
         x = self.attention(x, mask, causal_valid_mask)
 
         # Zero out padded positions before the depthwise conv.
-        valid = ops.cast(ops.expand_dims(mask, axis=-1), x.dtype)
+        valid = ops.cast(
+            ops.expand_dims(mask, axis=-1), x.dtype
+        )
         x_for_lconv = x * valid
         x = self.lconv(x_for_lconv)
 
         x = self.ffw_end(x)
+
         x = ops.clip(x, -self.gradient_clipping, self.gradient_clipping)
         return self.norm(x)
+
 
     def get_config(self):
         config = super().get_config()
@@ -1439,11 +1463,9 @@ class Gemma4AudioEncoder(keras.Model):
         max_future = context_right
         C = chunk_size + max_past + max_future
         upper_diagonal = max_past + max_future
-        lower_causal = np.tril(np.ones((C, chunk_size), dtype=bool), k=0).T
-        upper_causal = np.tril(
-            np.ones((chunk_size, C), dtype=bool), k=upper_diagonal
-        )
-        self._causal_valid_mask_np = lower_causal & upper_causal  # (W, C)
+        w_idx = np.arange(chunk_size)[:, None]  # (W, 1)
+        c_idx = np.arange(C)[None, :]  # (1, C)
+        self._causal_valid_mask_np = (c_idx <= w_idx + max_past) & (c_idx > w_idx)
 
     def call(self, audio_mel, audio_mel_mask):
         """Encode a batch of mel spectrograms.
@@ -1456,7 +1478,7 @@ class Gemma4AudioEncoder(keras.Model):
                 `(B, N_images, H, W, C)`).
             audio_mel_mask: bool/int tensor matching the time axis of
                 `audio_mel` — either `(B, N_clips, T)` or `(B, T)`.
-                True = padded/invalid.
+                True = valid.
 
         Returns:
             float tensor `(B_out, T_out, output_dim)` where
@@ -1492,7 +1514,7 @@ class Gemma4AudioEncoder(keras.Model):
         )
 
         # 3. Conformer blocks.
-        for block in self.conformer_blocks:
+        for i, block in enumerate(self.conformer_blocks):
             x = block(x, mask, causal_valid_mask)
 
         # 4. Optional temporal stride.
@@ -1507,6 +1529,7 @@ class Gemma4AudioEncoder(keras.Model):
         # Ensure mask length matches x length (they should match after the
         # same stride, but guard against any off-by-one rounding).
         static_T = x.shape[1]
+
         if static_T is not None:
             t_out = static_T
         else:

@@ -81,7 +81,7 @@ class Gemma4AudioConverter(AudioConverter):
     def __init__(
         self,
         num_mels=128,
-        num_fft_bins=400,
+        num_fft_bins=512,
         stride=160,
         sampling_rate=16000,
         max_audio_length=30,
@@ -90,6 +90,7 @@ class Gemma4AudioConverter(AudioConverter):
         mel_floor=1e-5,
         per_bin_mean=None,
         per_bin_stddev=None,
+        frame_length=320,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -105,6 +106,7 @@ class Gemma4AudioConverter(AudioConverter):
         self.min_frequency = min_frequency
         self.max_frequency = max_frequency
         self.mel_floor = float(mel_floor)
+        self.frame_length = frame_length or num_fft_bins
         # Store as Python lists so they round-trip through get_config().
         self.per_bin_mean = (
             list(per_bin_mean) if per_bin_mean is not None else None
@@ -155,9 +157,6 @@ class Gemma4AudioConverter(AudioConverter):
         upper = slopes[:, 2:] / freq_diff[1:]
         filters = np.maximum(0.0, np.minimum(lower, upper))  # (n_fft, n)
 
-        # Slaney normalisation.
-        enorm = 2.0 / (freqs[2 : n + 2] - freqs[:n])
-        filters *= enorm[np.newaxis, :]
 
         return filters.astype(np.float32)
 
@@ -172,20 +171,25 @@ class Gemma4AudioConverter(AudioConverter):
         """
         audio = ops.cast(audio, self.compute_dtype)
 
+        # Pad left by frame_length // 2 for semicausal padding
+        pad_left = self.frame_length // 2
+        paddings = [[0, 0], [pad_left, 0]]
+        audio = ops.pad(audio, paddings, mode="constant")
+
         # STFT → complex spectrum: (batch, time_frames, fft_bins).
         real, imag = ops.stft(
             audio,
-            sequence_length=self.num_fft_bins,
+            sequence_length=self.frame_length,
             sequence_stride=self.stride,
             fft_length=self.num_fft_bins,
             window="hann",
-            center=True,
+            center=False,
         )
 
-        # Power spectrum – drop the last time frame to get a round frame
+        # Magnitude spectrum – drop the last time frame to get a round frame
         # count of num_samples // stride.
-        magnitudes = ops.square(real[:, :-1, :]) + ops.square(
-            imag[:, :-1, :]
+        magnitudes = ops.sqrt(
+            ops.square(real[:, :-1, :]) + ops.square(imag[:, :-1, :])
         )  # (batch, num_frames, fft_bins)
 
         # Mel filterbank matmul: (batch, num_frames, fft_bins) @
@@ -197,7 +201,7 @@ class Gemma4AudioConverter(AudioConverter):
 
         # Log compression.
         mel_floor = ops.cast(self.mel_floor, self.compute_dtype)
-        log_spec = ops.log(ops.maximum(mel_spec, mel_floor))
+        log_spec = ops.log(mel_spec + mel_floor)
 
         # Optional per-bin mean / stddev normalisation.
         if self.per_bin_mean is not None:
@@ -271,6 +275,7 @@ class Gemma4AudioConverter(AudioConverter):
                 "mel_floor": self.mel_floor,
                 "per_bin_mean": self.per_bin_mean,
                 "per_bin_stddev": self.per_bin_stddev,
+                "frame_length": self.frame_length,
             }
         )
         return config
