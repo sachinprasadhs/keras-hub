@@ -47,7 +47,13 @@ PRESET_MAP = {
 }
 
 IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
-AUDIO_FILE_PATH = "/usr/local/google/home/sachinprasad/Projects/KERAS-HUB-PRIVATE/keras-hub-private/keras_hub/src/tests/test_data/audio_transcription_tests/male_short_voice_clip_3sec.wav"
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# tools/checkpoint_conversion/ is 2 levels deep from repo root
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "../.."))
+AUDIO_FILE_PATH = os.path.join(
+    _REPO_ROOT,
+    "keras_hub/src/tests/test_data/audio_transcription_tests/male_short_voice_clip_3sec.wav",
+)
 
 PROMPT = (
     "<start_of_turn>user\n\n<|image|>\nWhat is in this image?"
@@ -465,11 +471,17 @@ def main(_):
     raw_image = _load_test_image()
     
     import soundfile as sf
-    raw_audio, sr = sf.read(AUDIO_FILE_PATH)
-    if sr != 16000:
-        from scipy import signal
-        num_samples = int(len(raw_audio) * 16000 / sr)
-        raw_audio = signal.resample(raw_audio, num_samples)
+    try:
+        raw_audio, sr = sf.read(AUDIO_FILE_PATH)
+        if sr != 16000:
+            from scipy import signal
+            num_samples = int(len(raw_audio) * 16000 / sr)
+            raw_audio = signal.resample(raw_audio, num_samples)
+    except Exception as e:
+        print(f"Warning: Could not read audio file at {AUDIO_FILE_PATH}: {e}")
+        print("Using dummy zero audio instead.")
+        raw_audio = np.zeros((16000 * 3,), dtype=np.float32)
+        sr = 16000
 
     # Evict stale cache BEFORE any download so that both AutoModel and
 
