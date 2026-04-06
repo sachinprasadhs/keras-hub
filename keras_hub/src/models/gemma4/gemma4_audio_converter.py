@@ -121,6 +121,18 @@ class Gemma4AudioConverter(AudioConverter):
         # HTK mel filterbank: shape (num_fft_bins // 2 + 1, num_mels).
         self.mel_filters = self._get_mel_filters()
 
+        # Periodic Hann window matching HF
+        length = self.frame_length + 1
+        window = np.hanning(length)
+        self.window = ops.convert_to_tensor(window[:-1], dtype="float32")
+
+        # Precompute indices for manual framing
+        num_frames = self.num_samples // self.stride
+        one_frame_indices = np.arange(self.frame_length)
+        start_indices = np.arange(num_frames) * self.stride
+        indices = start_indices[:, None] + one_frame_indices[None, :]
+        self.indices = ops.convert_to_tensor(indices, dtype="int32")
+
         self.built = True
 
     def _get_mel_filters(self):
@@ -176,21 +188,27 @@ class Gemma4AudioConverter(AudioConverter):
         paddings = [[0, 0], [pad_left, 0]]
         audio = ops.pad(audio, paddings, mode="constant")
 
-        # STFT → complex spectrum: (batch, time_frames, fft_bins).
-        real, imag = ops.stft(
-            audio,
-            sequence_length=self.frame_length,
-            sequence_stride=self.stride,
-            fft_length=self.num_fft_bins,
-            window="hann",
-            center=False,
-        )
+        # Manual Framing
+        # audio is (batch, L), self.indices is (num_frames, frame_length)
+        # Use ops.take to create (batch, num_frames, frame_length)
+        frames = ops.take(audio, self.indices, axis=1)
 
-        # Magnitude spectrum – drop the last time frame to get a round frame
-        # count of num_samples // stride.
-        magnitudes = ops.sqrt(
-            ops.square(real[:, :-1, :]) + ops.square(imag[:, :-1, :])
-        )  # (batch, num_frames, fft_bins)
+        # Apply window
+        frames = frames * self.window
+
+        # Zero-pad to fft_length
+        padding = self.num_fft_bins - self.frame_length
+        frames_padded = ops.pad(frames, [[0, 0], [0, 0], [0, padding]])
+
+        # FFT
+        real, imag = ops.fft((frames_padded, ops.zeros_like(frames_padded)))
+
+        # Truncate to first half of bins (rfft equivalent)
+        real = real[..., : self.num_fft_bins // 2 + 1]
+        imag = imag[..., : self.num_fft_bins // 2 + 1]
+
+        # Magnitude spectrum
+        magnitudes = ops.sqrt(ops.square(real) + ops.square(imag))
 
         # Mel filterbank matmul: (batch, num_frames, fft_bins) @
         #   (fft_bins, num_mels) → (batch, num_frames, num_mels)

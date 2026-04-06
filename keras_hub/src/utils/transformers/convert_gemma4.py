@@ -254,7 +254,9 @@ def convert_weights(backbone, loader, transformers_config):
     )
 
     # Per-layer token conditioning (E4B / E2B models).
+    print(f"DEBUG convert_gemma4: backbone.hidden_size_per_layer_input = {backbone.hidden_size_per_layer_input}")
     if backbone.hidden_size_per_layer_input > 0:
+        print("DEBUG convert_gemma4: Porting per-layer token embedding")
         loader.port_weight(
             keras_variable=backbone.get_layer(
                 "per_layer_token_embedding"

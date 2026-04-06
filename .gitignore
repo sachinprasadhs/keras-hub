@@ -22,3 +22,7 @@ build/
 venv/
 .venv/
 .DS_Store
+
+# Generated models
+gemma4_instruct_2b/
+
