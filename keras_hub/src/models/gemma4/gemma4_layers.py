@@ -192,9 +192,9 @@ class Gemma4InterleaveEmbeddings(keras.layers.Layer):
 
         num_patches = ops.shape(image_embeddings)[2]
 
-        # Fast path for text-only generation where max_images is 0
-        if max_images == 0:
-            return text_embeddings
+        # Keep inputs connected even if empty to avoid Keras errors
+        dummy = ops.sum(image_embeddings) + ops.sum(ops.cast(vision_indices, image_embeddings.dtype))
+        text_embeddings = text_embeddings + dummy * 0.0
 
         flat_text_embeddings = ops.reshape(
             text_embeddings, (batch_size * seq_length, embedding_dim)

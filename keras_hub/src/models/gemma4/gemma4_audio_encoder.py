@@ -331,8 +331,6 @@ class Gemma4AudioAttention(keras.layers.Layer):
         W = self.chunk_size
 
         if isinstance(static_T, int):
-            # Static length coords setups coord absolute triggers setups cords
-            # triggers absolute
             pad_len = (-static_T) % W
             if pad_len > 0:
                 zeros_row = ops.zeros_like(x[:, :1, ...])
@@ -342,10 +340,21 @@ class Gemma4AudioAttention(keras.layers.Layer):
                 x = ops.concatenate([x, zero_pad], axis=1)
             num_blocks = (static_T + pad_len) // W
         else:
-            # Symbolic tracing coords absolute setups coordinators layouts list
-            # coords triggers
             T = ops.shape(x)[1]
-            num_blocks = T // W
+            pad_len = (-T) % W
+            
+            def pad_fn():
+                zeros_row = ops.zeros_like(x[:, :1, ...])
+                zero_pad = ops.tile(
+                    zeros_row, [1, pad_len] + [1] * (x.ndim - 2)
+                )
+                return ops.concatenate([x, zero_pad], axis=1)
+                
+            def no_pad_fn():
+                return x
+                
+            x = ops.cond(pad_len > 0, pad_fn, no_pad_fn)
+            num_blocks = (T + pad_len) // W
 
         ndim = len(x.shape)
         if ndim == 2:
@@ -1276,17 +1285,26 @@ class Gemma4AudioConformerBlock(keras.layers.Layer):
         config = super().get_config()
         config.update(
             {
+                "input_feat_size": self.input_feat_size,
                 "hidden_size": self.hidden_size,
                 "num_heads": self.num_heads,
+                "num_layers": self.num_layers,
                 "chunk_size": self.chunk_size,
                 "context_left": self.context_left,
                 "context_right": self.context_right,
                 "logit_cap": self.logit_cap,
                 "invalid_logit_value": self.invalid_logit_value,
                 "conv_kernel_size": self.conv_kernel_size,
+                "reduction_factor": self.reduction_factor,
                 "residual_weight": self.residual_weight,
                 "gradient_clipping": self.gradient_clipping,
+                "sscp_conv_channels": self.sscp_conv_channels,
+                "sscp_kernel_sizes": self.sscp_kernel_sizes,
+                "sscp_stride_sizes": self.sscp_stride_sizes,
+                "output_proj_dims": self.output_proj_dims,
+                "output_dim": self.output_dim,
                 "norm_eps": self.norm_eps,
+                "sscp_norm_eps": self.sscp_norm_eps,
             }
         )
         return config

@@ -47,6 +47,9 @@ class MockGemma4Tokenizer(Tokenizer):
             "\n\n",
             "<|turn>",
             "<turn|>",
+            "<|audio|>",
+            "<|audio>",
+            "<audio|>",
         ]
         self.string_to_id = tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(
@@ -76,6 +79,7 @@ class MockGemma4Tokenizer(Tokenizer):
         self.sequence_length = sequence_length
         self.add_bos = add_bos
         self.add_eos = add_eos
+        self.audio_placeholder_id = -1
 
     def vocabulary_size(self):
         return len(self.vocabulary)
@@ -110,6 +114,21 @@ class MockGemma4Tokenizer(Tokenizer):
             inputs,
             re.escape(self.image_placeholder),
             f" {self.image_placeholder} ",
+        )
+        inputs = tf.strings.regex_replace(
+            inputs,
+            re.escape("<|audio>"),
+            " <|audio> ",
+        )
+        inputs = tf.strings.regex_replace(
+            inputs,
+            re.escape("<audio|>"),
+            " <audio|> ",
+        )
+        inputs = tf.strings.regex_replace(
+            inputs,
+            re.escape("<|audio|>"),
+            " <|audio|> ",
         )
         inputs = tf.strings.regex_replace(inputs, "  ", " ")
         inputs = tf.strings.strip(inputs)

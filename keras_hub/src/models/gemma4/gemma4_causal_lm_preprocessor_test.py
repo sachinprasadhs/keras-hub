@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import tensorflow as tf
 
 from keras_hub.src.models.gemma4.gemma4_causal_lm_preprocessor import (
     Gemma4CausalLMPreprocessor,
@@ -49,19 +50,24 @@ class Gemma4CausalLMPreprocessorTest(TestCase):
             "prompts": ["the quick brown fox"],
             "responses": ["round"],
         }
-        self.run_preprocessing_layer_test(
-            cls=Gemma4CausalLMPreprocessor,
-            init_kwargs=self.init_text_kwargs,
-            input_data=input_data,
-            expected_output=(
-                {
-                    "token_ids": [[1, 9, 14, 10, 12, 15, 2, 0]],
-                    "padding_mask": [[1, 1, 1, 1, 1, 1, 1, 0]],
-                },
-                [[9, 14, 10, 12, 15, 2, 0, 0]],  # Labels shifted.
-                [[0, 0, 0, 0, 1, 1, 0, 0]],  # Zero out unlabeled examples.
-            ),
+        preprocessor = Gemma4CausalLMPreprocessor(**self.init_text_kwargs)
+        self.run_serialization_test(preprocessor)
+        
+        output = preprocessor(input_data)
+        
+        expected_output_batched = (
+            {
+                "token_ids": [[1, 9, 14, 10, 12, 15, 2, 0]],
+                "padding_mask": [[1, 1, 1, 1, 1, 1, 1, 0]],
+                "position_ids": [[0, 1, 2, 3, 4, 5, 6, 7]],
+            },
+            [[9, 14, 10, 12, 15, 2, 0, 0]],  # Labels shifted.
+            [[0, 0, 0, 0, 1, 1, 0, 0]],  # Zero out unlabeled examples.
         )
+        
+        self.assertAllClose(output, expected_output_batched)
+        
+
 
     def test_preprocessor_basics(self):
         input_data = {

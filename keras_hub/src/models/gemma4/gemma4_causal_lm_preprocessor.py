@@ -88,6 +88,15 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             the batch. Defaults to 2.
         num_vision_tokens_per_image: int. Number of vision placeholder tokens
             per image. Defaults to 280.
+        audio_converter: A `keras_hub.layers.AudioConverter` instance. Defaults
+            to `None`.
+        max_audio_clips_per_prompt: int. Permissible number of audio clips per
+            sample in the batch. Defaults to 1.
+        num_audio_tokens_per_clip: int. Legacy parameter, no longer used for
+            token calculation as audio expansion is now fully dynamic. Defaults
+            to 750.
+        audio_input_feat_size: int. Number of mel-spectrogram frequency bins.
+            Defaults to 128.
     """
 
     backbone_cls = Gemma4Backbone
@@ -307,6 +316,11 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         else:
             vision_indices = self._get_vision_indices(vision_mask=vision_mask)
 
+        if pixel_values is None:
+            pixel_values = tf.zeros((batch_size, 0, 16, 48), dtype="float32")
+        if pixel_position_ids is None:
+            pixel_position_ids = tf.zeros((batch_size, 0, 16, 2), dtype="int32")
+
         x = {
             "pixel_values": pixel_values
             if (pixel_values is None or batched)
@@ -525,6 +539,8 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
 
         images = x.get("images", None)
         audio = x.get("audio", None)
+        audio_mel = x.get("audio_mel", None)
+        audio_mel_mask = x.get("audio_mel_mask", None)
 
         if self.text_only_model and audio is not None:
             raise ValueError(
@@ -543,10 +559,8 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
                 + f"{self.end_of_image_token}",
             )
 
-        audio_mel = None
-        audio_mel_mask = None
         if self.audio_converter is not None:
-            if audio is not None:
+            if audio is not None and audio_mel is None:
                 audio_mel, audio_mel_mask = self._preprocess_audio(audio, batched)
                 output_lengths = tf.reduce_sum(audio_mel_mask, axis=[1, 2])
                 exact_tokens = (output_lengths + 3) // 4
@@ -585,7 +599,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         audio_indices = None
         audio_mask = None
 
-        if audio is not None and self.audio_converter is not None:
+        if (audio is not None or audio_mel is not None) and self.audio_converter is not None:
             # audio_mel and audio_mel_mask were calculated earlier!
             
             # Clip audio_mel to match the number of available placeholders.
@@ -637,9 +651,13 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
 
         # === Text-only Model ===
         if self.text_only_model:
+            seq_len = tf.shape(token_ids)[1] - 1
+            pos_ids = tf.range(seq_len, dtype=tf.int32)[tf.newaxis, :]
+            pos_ids = tf.tile(pos_ids, [tf.shape(token_ids)[0], 1])
             x = {
                 "token_ids": token_ids[..., :-1],
                 "padding_mask": padding_mask[..., :-1],
+                "position_ids": pos_ids,
             }
             y = token_ids[..., 1:]
             sample_weight = response_mask[..., 1:]

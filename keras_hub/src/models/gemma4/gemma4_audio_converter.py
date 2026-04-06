@@ -188,17 +188,31 @@ class Gemma4AudioConverter(AudioConverter):
         paddings = [[0, 0], [pad_left, 0]]
         audio = ops.pad(audio, paddings, mode="constant")
 
-        # Manual Framing
-        # audio is (batch, L), self.indices is (num_frames, frame_length)
-        # Use ops.take to create (batch, num_frames, frame_length)
-        frames = ops.take(audio, self.indices, axis=1)
+        def true_fn():
+            max_idx = ops.shape(audio)[1]
+            safe_indices = ops.minimum(self.indices, ops.maximum(max_idx - 1, 0))
+            frames = ops.take(audio, safe_indices, axis=1)
+            out_of_bounds = self.indices >= max_idx
+            out_of_bounds = ops.expand_dims(out_of_bounds, axis=0)
+            return ops.where(out_of_bounds, ops.cast(0.0, frames.dtype), frames)
+
+        def false_fn():
+            batch_size = ops.shape(audio)[0]
+            num_frames = self.num_samples // self.stride
+            return ops.zeros((batch_size, num_frames, self.frame_length), dtype=audio.dtype)
+
+        max_idx = ops.shape(audio)[1]
+        frames = ops.cond(max_idx > 0, true_fn, false_fn)
 
         # Apply window
         frames = frames * self.window
 
         # Zero-pad to fft_length
         padding = self.num_fft_bins - self.frame_length
-        frames_padded = ops.pad(frames, [[0, 0], [0, 0], [0, padding]])
+        if padding > 0:
+            frames_padded = ops.pad(frames, [[0, 0], [0, 0], [0, padding]])
+        else:
+            frames_padded = frames[..., : self.num_fft_bins]
 
         # FFT
         real, imag = ops.fft((frames_padded, ops.zeros_like(frames_padded)))

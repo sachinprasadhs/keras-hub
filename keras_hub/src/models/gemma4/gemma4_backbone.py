@@ -377,23 +377,14 @@ class Gemma4Backbone(Backbone):
         # === Functional Model ===
 
         # Vision inputs.
-        if vision_encoder is not None:
-            pixel_values_input = keras.Input(
-                shape=(None, None, None),
-                name="pixel_values",
-            )
-            pixel_position_ids_input = keras.Input(
-                shape=(None, None, 2), dtype="int32", name="pixel_position_ids"
-            )
-            vision_indices_input = keras.Input(
-                shape=(None,), dtype="int32", name="vision_indices"
-            )
-            vision_mask_input = keras.Input(
-                shape=(None,), dtype="int32", name="vision_mask"
-            )
-
         # Audio inputs.
         if audio_encoder is not None:
+            audio_indices_input = keras.Input(
+                shape=(None,), dtype="int32", name="audio_indices"
+            )
+            audio_mask_input = keras.Input(
+                shape=(None,), dtype="int32", name="audio_mask"
+            )
             audio_mel_input = keras.Input(
                 shape=(None, None, audio_encoder.input_feat_size),
                 name="audio_mel",
@@ -401,22 +392,35 @@ class Gemma4Backbone(Backbone):
             audio_mel_mask_input = keras.Input(
                 shape=(None, None), dtype="int32", name="audio_mel_mask"
             )
-            audio_indices_input = keras.Input(
-                shape=(None,), dtype="int32", name="audio_indices"
-            )
-            audio_mask_input = keras.Input(
-                shape=(None,), dtype="int32", name="audio_mask"
-            )
 
-        token_id_input = keras.Input(
-            shape=(None,), dtype="int32", name="token_ids"
-        )
         padding_mask_input = keras.Input(
             shape=(None,), dtype="int32", name="padding_mask"
         )
+
+        # Vision inputs.
+        if vision_encoder is not None:
+            pixel_position_ids_input = keras.Input(
+                shape=(None, None, 2), dtype="int32", name="pixel_position_ids"
+            )
+            pixel_values_input = keras.Input(
+                shape=(None, None, None),
+                name="pixel_values",
+            )
+
         position_ids_input = keras.Input(
             shape=(None,), dtype="int32", name="position_ids"
         )
+        token_id_input = keras.Input(
+            shape=(None,), dtype="int32", name="token_ids"
+        )
+
+        if vision_encoder is not None:
+            vision_indices_input = keras.Input(
+                shape=(None,), dtype="int32", name="vision_indices"
+            )
+            vision_mask_input = keras.Input(
+                shape=(None,), dtype="int32", name="vision_mask"
+            )
 
 
         # Text embeddings.
@@ -457,6 +461,12 @@ class Gemma4Backbone(Backbone):
                 text_embeddings=x,
                 vision_indices=audio_indices_input,
             )
+
+        # Force connection of audio_mask_input if not used in per-layer embeddings
+        if audio_encoder is not None and hidden_size_per_layer_input <= 0:
+            dummy = ops.cast(audio_mask_input, x.dtype) * 0.0
+            dummy = ops.expand_dims(dummy, axis=-1)
+            x = x + dummy
 
         # Per-layer token embeddings. Vision positions use pad_token_id (0),
         # mirroring HF's llm_input_ids masking before embed_tokens_per_layer.
@@ -570,16 +580,16 @@ class Gemma4Backbone(Backbone):
             outputs = sequence_output
 
         inputs = {
-            "token_ids": token_id_input,
             "padding_mask": padding_mask_input,
             "position_ids": position_ids_input,
+            "token_ids": token_id_input,
         }
 
         if vision_encoder is not None:
             inputs.update(
                 {
-                    "pixel_values": pixel_values_input,
                     "pixel_position_ids": pixel_position_ids_input,
+                    "pixel_values": pixel_values_input,
                     "vision_indices": vision_indices_input,
                     "vision_mask": vision_mask_input,
                 }
@@ -587,10 +597,10 @@ class Gemma4Backbone(Backbone):
         if audio_encoder is not None:
             inputs.update(
                 {
-                    "audio_mel": audio_mel_input,
-                    "audio_mel_mask": audio_mel_mask_input,
                     "audio_indices": audio_indices_input,
                     "audio_mask": audio_mask_input,
+                    "audio_mel": audio_mel_input,
+                    "audio_mel_mask": audio_mel_mask_input,
                 }
             )
 
