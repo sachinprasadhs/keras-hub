@@ -532,11 +532,6 @@ class Gemma4CausalLM(CausalLM):
         return {
             "token_ids": token_ids,
             "padding_mask": padding_mask,
-            "pixel_values": pixel_values,
-            "pixel_position_ids": pixel_position_ids,
-            "audio_mel": audio_mel,
-            "audio_mel_mask": audio_mel_mask,
-            "audio_indices": audio_indices,
         }
 
     def generate(

@@ -72,7 +72,6 @@ def convert_backbone_config(transformers_config):
         text_cfg = transformers_config
         vision_encoder = None
         audio_encoder = None
-        num_audio_tokens_per_clip = None
         image_size = None
     else:
         text_cfg = transformers_config["text_config"]
@@ -128,10 +127,8 @@ def convert_backbone_config(transformers_config):
                 norm_eps=aud_cfg["rms_norm_eps"],
                 sscp_norm_eps=aud_cfg["rms_norm_eps"],
             )
-            num_audio_tokens_per_clip = aud_cfg.get("num_audio_tokens_per_clip")
         else:
             audio_encoder = None
-            num_audio_tokens_per_clip = None
 
     # Config stores the pattern as "_sliding_window_pattern" (underscore
     # prefix).
@@ -202,7 +199,6 @@ def convert_backbone_config(transformers_config):
         "layer_norm_epsilon": text_cfg.get("rms_norm_eps", 1e-6),
         "vision_encoder": vision_encoder,
         "audio_encoder": audio_encoder,
-        "num_audio_tokens_per_clip": num_audio_tokens_per_clip,
         "num_kv_shared_layers": text_cfg.get("num_kv_shared_layers", 0),
         "num_global_key_value_heads": text_cfg.get(
             "num_global_key_value_heads", None
