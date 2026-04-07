@@ -44,7 +44,6 @@ PRESET_MAP = {
     "gemma4_instruct_26b_a4b": "google/gemma-4-26B-A4B-it",
     "gemma4_31b": "google/gemma-4-31B",
     "gemma4_instruct_31b": "google/gemma-4-31B-it",
-    "gemma4_audio_9b": "google/gemma-4-audio-9b",
 }
 
 IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
@@ -560,15 +559,19 @@ def main(_):
         raw_image,
     )
     
-    print("-> Precomputing HF outputs for audio...")
-    hf_data_audio = _precompute_hf_outputs(
-        hf_model,
-        hf_tokenizer,
-        hf_preset,
-        PROMPT_AUDIO,
-        raw_image=None,
-        raw_audio=raw_audio,
-    )
+    is_audio_model = hasattr(hf_model.config, "audio_config") and hf_model.config.audio_config is not None
+    
+    hf_data_audio = None
+    if is_audio_model:
+        print("-> Precomputing HF outputs for audio...")
+        hf_data_audio = _precompute_hf_outputs(
+            hf_model,
+            hf_tokenizer,
+            hf_preset,
+            PROMPT_AUDIO,
+            raw_image=None,
+            raw_audio=raw_audio,
+        )
 
     print("DEBUG HF weight names containing 'per_layer', 'embed', or 'audio':")
     for k in hf_model.state_dict().keys():
@@ -650,72 +653,73 @@ def main(_):
     for w in keras_hub_backbone.weights:
         print(f"  {w.name}")
 
-    print("\n--- Running Audio Verification ---")
-    print(f"DEBUG HF hidden_size_per_layer_input: {hf_data_audio.get('hidden_size_per_layer_input', None)}")
+    if is_audio_model:
+        print("\n--- Running Audio Verification ---")
+        print(f"DEBUG HF hidden_size_per_layer_input: {hf_data_audio.get('hidden_size_per_layer_input', None)}")
 
-    _test_audio_preprocessor(keras_hub_preprocessor, raw_audio, hf_data_audio["input_features"])
-    print("\n--- Audio Numerics Verification ---")
-    
-    # Use full preprocessor for logit comparison as requested by user
-    # Increase sequence length by 1 to fit all 81 placeholders
-    keras_hub_inputs_audio = keras_hub_preprocessor(
-        {"prompts": [PROMPT_AUDIO], "audio": [raw_audio], "responses": [""]},
-        sequence_length=hf_data_audio["logits"].shape[1] + 1,
-    )
-    
-    # Preprocessor returns a tuple, first element is the dict of inputs
-    inputs_dict = keras_hub_inputs_audio[0] if isinstance(keras_hub_inputs_audio, tuple) else keras_hub_inputs_audio
-    
-    if "hf_audio_features" in hf_data_audio and hf_data_audio["hf_audio_features"] is not None:
-        print("\n--- Audio Encoder Output Comparison ---")
-        if hasattr(keras_hub_backbone, "audio_encoder") and keras_hub_backbone.audio_encoder is not None:
-            kh_feat = keras_hub_backbone.audio_encoder(
-                inputs_dict["audio_mel"],
-                inputs_dict["audio_mel_mask"].to(torch.bool)
-            )
-            kh_feat = ops.convert_to_numpy(kh_feat).astype(np.float32)
-            hf_feat = hf_data_audio["hf_audio_features"]
-            
-            print(f"KerasHub Audio Features shape: {kh_feat.shape}")
-            print(f"HF Audio Features shape: {hf_feat.shape}")
-            
-            kh_feat_sq = np.squeeze(kh_feat)
-            hf_feat_sq = np.squeeze(hf_feat)
-            
-            print(f"Squeezed KH shape: {kh_feat_sq.shape}")
-            print(f"Squeezed HF shape: {hf_feat_sq.shape}")
-            print(f"DEBUG KH Audio Features: min={np.min(kh_feat_sq)}, max={np.max(kh_feat_sq)}, mean={np.mean(kh_feat_sq)}")
-            print(f"DEBUG HF Audio Features (before proj): min={np.min(hf_feat_sq)}, max={np.max(hf_feat_sq)}, mean={np.mean(hf_feat_sq)}")
-            
-            # Apply KerasHub's final layers to HF features to see if it aligns
-            hf_feat_tensor = torch.from_numpy(hf_feat)
-            hf_feat_tensor = keras_hub_backbone.audio_encoder.output_norm(hf_feat_tensor)
-            hf_feat_tensor = keras_hub_backbone.audio_encoder.audio_output_projection(hf_feat_tensor)
-            hf_feat_proj = ops.convert_to_numpy(hf_feat_tensor).astype(np.float32)
-            hf_feat_proj_sq = np.squeeze(hf_feat_proj)
-            
-            print(f"DEBUG HF Audio Features (after proj): min={np.min(hf_feat_proj_sq)}, max={np.max(hf_feat_proj_sq)}, mean={np.mean(hf_feat_proj_sq)}")
-            
-            # Limit to min shape if they differ
-            min_len = min(kh_feat_sq.shape[0], hf_feat_proj_sq.shape[0])
-            abs_diff = np.abs(kh_feat_sq[:min_len] - hf_feat_proj_sq[:min_len])
-            print(f"Max abs diff in Audio Features (after proj): {np.max(abs_diff):.6f}")
-            print(f"Mean abs diff in Audio Features (after proj): {np.mean(abs_diff):.6f}")
-            
-            # Also keep the original comparison just in case
-            abs_diff_orig = np.abs(kh_feat_sq[:min_len] - hf_feat_sq[:min_len])
-            print(f"Max abs diff in Audio Features (orig): {np.max(abs_diff_orig):.6f}")
-            
-    print(f"DEBUG token_ids raw: {inputs_dict['token_ids']}")
-    print(f"DEBUG audio_indices raw: {inputs_dict['audio_indices']}")
-    print(f"DEBUG HF token IDs: {hf_data_audio['input_ids']}")
-    if "mm_token_type_ids" in hf_data_audio:
-        print(f"DEBUG HF mm_token_type_ids: {hf_data_audio['mm_token_type_ids']}")
-    try:
-        decoded = keras_hub_preprocessor.tokenizer.detokenize(inputs_dict['token_ids'])
-        print(f"DEBUG decoded prompt: {decoded}")
-    except Exception as e:
-        print(f"Warning: Could not detokenize: {e}")
+        _test_audio_preprocessor(keras_hub_preprocessor, raw_audio, hf_data_audio["input_features"])
+        print("\n--- Audio Numerics Verification ---")
+        
+        # Use full preprocessor for logit comparison as requested by user
+        # Increase sequence length by 1 to fit all 81 placeholders
+        keras_hub_inputs_audio = keras_hub_preprocessor(
+            {"prompts": [PROMPT_AUDIO], "audio": [raw_audio], "responses": [""]},
+            sequence_length=hf_data_audio["logits"].shape[1] + 1,
+        )
+        
+        # Preprocessor returns a tuple, first element is the dict of inputs
+        inputs_dict = keras_hub_inputs_audio[0] if isinstance(keras_hub_inputs_audio, tuple) else keras_hub_inputs_audio
+        
+        if "hf_audio_features" in hf_data_audio and hf_data_audio["hf_audio_features"] is not None:
+            print("\n--- Audio Encoder Output Comparison ---")
+            if hasattr(keras_hub_backbone, "audio_encoder") and keras_hub_backbone.audio_encoder is not None:
+                kh_feat = keras_hub_backbone.audio_encoder(
+                    inputs_dict["audio_mel"],
+                    inputs_dict["audio_mel_mask"].to(torch.bool)
+                )
+                kh_feat = ops.convert_to_numpy(kh_feat).astype(np.float32)
+                hf_feat = hf_data_audio["hf_audio_features"]
+                
+                print(f"KerasHub Audio Features shape: {kh_feat.shape}")
+                print(f"HF Audio Features shape: {hf_feat.shape}")
+                
+                kh_feat_sq = np.squeeze(kh_feat)
+                hf_feat_sq = np.squeeze(hf_feat)
+                
+                print(f"Squeezed KH shape: {kh_feat_sq.shape}")
+                print(f"Squeezed HF shape: {hf_feat_sq.shape}")
+                print(f"DEBUG KH Audio Features: min={np.min(kh_feat_sq)}, max={np.max(kh_feat_sq)}, mean={np.mean(kh_feat_sq)}")
+                print(f"DEBUG HF Audio Features (before proj): min={np.min(hf_feat_sq)}, max={np.max(hf_feat_sq)}, mean={np.mean(hf_feat_sq)}")
+                
+                # Apply KerasHub's final layers to HF features to see if it aligns
+                hf_feat_tensor = torch.from_numpy(hf_feat)
+                hf_feat_tensor = keras_hub_backbone.audio_encoder.output_norm(hf_feat_tensor)
+                hf_feat_tensor = keras_hub_backbone.audio_encoder.audio_output_projection(hf_feat_tensor)
+                hf_feat_proj = ops.convert_to_numpy(hf_feat_tensor).astype(np.float32)
+                hf_feat_proj_sq = np.squeeze(hf_feat_proj)
+                
+                print(f"DEBUG HF Audio Features (after proj): min={np.min(hf_feat_proj_sq)}, max={np.max(hf_feat_proj_sq)}, mean={np.mean(hf_feat_proj_sq)}")
+                
+                # Limit to min shape if they differ
+                min_len = min(kh_feat_sq.shape[0], hf_feat_proj_sq.shape[0])
+                abs_diff = np.abs(kh_feat_sq[:min_len] - hf_feat_proj_sq[:min_len])
+                print(f"Max abs diff in Audio Features (after proj): {np.max(abs_diff):.6f}")
+                print(f"Mean abs diff in Audio Features (after proj): {np.mean(abs_diff):.6f}")
+                
+                # Also keep the original comparison just in case
+                abs_diff_orig = np.abs(kh_feat_sq[:min_len] - hf_feat_sq[:min_len])
+                print(f"Max abs diff in Audio Features (orig): {np.max(abs_diff_orig):.6f}")
+                
+        print(f"DEBUG token_ids raw: {inputs_dict['token_ids']}")
+        print(f"DEBUG audio_indices raw: {inputs_dict['audio_indices']}")
+        print(f"DEBUG HF token IDs: {hf_data_audio['input_ids']}")
+        if "mm_token_type_ids" in hf_data_audio:
+            print(f"DEBUG HF mm_token_type_ids: {hf_data_audio['mm_token_type_ids']}")
+        try:
+            decoded = keras_hub_preprocessor.tokenizer.detokenize(inputs_dict['token_ids'])
+            print(f"DEBUG decoded prompt: {decoded}")
+        except Exception as e:
+            print(f"Warning: Could not detokenize: {e}")
 
 #    _test_numerics(
 #        keras_hub_backbone, 
