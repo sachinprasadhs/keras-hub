@@ -17,6 +17,9 @@ from keras_hub.src.models.gemma4.gemma4_image_converter import (
     Gemma4ImageConverter,
 )
 from keras_hub.src.models.gemma4.gemma4_tokenizer import Gemma4Tokenizer
+from keras_hub.src.models.gemma4.gemma4_video_converter import (
+    Gemma4VideoConverter,
+)
 from keras_hub.src.utils.tensor_utils import preprocessing_function
 from keras_hub.src.utils.tensor_utils import strip_to_ragged
 
@@ -103,12 +106,14 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
     tokenizer_cls = Gemma4Tokenizer
     image_converter_cls = Gemma4ImageConverter
     audio_converter_cls = Gemma4AudioConverter
+    video_converter_cls = Gemma4VideoConverter
 
     def __init__(
         self,
         tokenizer,
         image_converter=None,
         audio_converter=None,
+        video_converter=None,
         sequence_length=1024,
         add_start_token=True,
         add_end_token=True,
@@ -117,6 +122,9 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         max_audio_clips_per_prompt=1,
         num_audio_tokens_per_clip=750,
         audio_input_feat_size=128,
+        num_frames_per_video=32,
+        num_vision_tokens_per_frame=70,
+        video_fps=1.0,
         **kwargs,
     ):
         super().__init__(
@@ -146,6 +154,11 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         self.max_audio_clips_per_prompt = max_audio_clips_per_prompt
         self.num_audio_tokens_per_clip = num_audio_tokens_per_clip
 
+        self.video_converter = video_converter
+        self.num_frames_per_video = num_frames_per_video
+        self.num_vision_tokens_per_frame = num_vision_tokens_per_frame
+        self.video_fps = video_fps
+
         # Number of mel-spectrogram frequency bins expected by the audio
         # encoder. Used to produce correctly-shaped dummy audio tensors.
         self.audio_input_feat_size = audio_input_feat_size
@@ -153,7 +166,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         # The preprocessor and model are "text-only" if no converters are
         # passed.
         self.text_only_model = (
-            self.image_converter is None and self.audio_converter is None
+            self.image_converter is None and self.audio_converter is None and self.video_converter is None
         )
 
         if self.image_converter is None:
@@ -173,6 +186,15 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             self.audio_placeholder = "<|audio|>"
             self.start_of_audio_token = "<|audio>"
             self.end_of_audio_token = "<audio|>"
+
+        if self.video_converter is None:
+            self.video_placeholder = None
+            self.start_of_video_token = None
+            self.end_of_video_token = None
+        else:
+            self.video_placeholder = "<|video|>"
+            self.start_of_video_token = "<|video>"
+            self.end_of_video_token = "<video|>"
 
     def build(self, input_shape):
         # Defer packer creation to `build()` so that we can be sure tokenizer
@@ -510,6 +532,42 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
 
         return mel, mask
 
+    def _preprocess_videos(self, videos, batched):
+        if isinstance(videos, (list, np.ndarray)):
+            videos = tf.ragged.constant(videos)
+        elif isinstance(videos, tf.RaggedTensor):
+            pass
+        elif isinstance(videos, tf.Tensor):
+            videos = tf.RaggedTensor.from_tensor(videos)
+        else:
+            try:
+                videos = tf.RaggedTensor.from_tensor(videos)
+            except Exception:  # noqa: BLE001
+                raise ValueError(
+                    "`videos` should be a list, ragged tensor, or dense tensor."
+                    f" Received: `type(videos)` = {type(videos)}"
+                )
+
+        if not batched:
+            videos = tf.expand_dims(videos, axis=0)
+
+        videos = videos.to_tensor(default_value=0)
+        
+        videos_dict = self.video_converter.call(videos)
+        pixel_values = videos_dict["pixel_values"]
+        pixel_position_ids = videos_dict["pixel_position_ids"]
+
+        if keras.config.backend() == "torch":
+            if not isinstance(pixel_values, tf.Tensor):
+                pixel_values = pixel_values.cpu()
+            if not isinstance(pixel_position_ids, tf.Tensor):
+                pixel_position_ids = pixel_position_ids.cpu()
+
+        return {
+            "pixel_values": pixel_values,
+            "pixel_position_ids": pixel_position_ids,
+        }
+
     @preprocessing_function
     def call(
         self,
@@ -538,6 +596,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         pixel_position_ids = x.get("pixel_position_ids", None)
 
         images = x.get("images", None)
+        videos = x.get("videos", None)
         audio = x.get("audio", None)
         audio_mel = x.get("audio_mel", None)
         audio_mel_mask = x.get("audio_mel_mask", None)
@@ -557,6 +616,25 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
                 f"{self.start_of_image_token}"
                 + self.image_placeholder * num_tokens
                 + f"{self.end_of_image_token}",
+            )
+
+        if self.video_converter is not None:
+            n_tokens = self.num_vision_tokens_per_frame
+            vid_pattern = re.escape(self.video_placeholder)
+            frames = []
+            for i in range(self.num_frames_per_video):
+                seconds = i / self.video_fps
+                mm = int(seconds // 60)
+                ss = int(seconds % 60)
+                timestamp = f"{mm:02d}:{ss:02d}"
+                frames.append(
+                    f"{timestamp} <|image>{self.video_placeholder * n_tokens}<image|>"
+                )
+            replacement = " ".join(frames)
+            prompts = tf.strings.regex_replace(
+                prompts,
+                vid_pattern,
+                replacement,
             )
 
         if self.audio_converter is not None:
@@ -678,6 +756,11 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             pixel_values = vision_dict["pixel_values"]
             pixel_position_ids = vision_dict["pixel_position_ids"]
             vision_mask = token_ids == self.tokenizer.image_placeholder_id
+        elif videos is not None and self.video_converter is not None:
+            videos_dict = self._preprocess_videos(videos, batched)
+            pixel_values = videos_dict["pixel_values"]
+            pixel_position_ids = videos_dict["pixel_position_ids"]
+            vision_mask = token_ids == self._video_placeholder_id
         elif pixel_values is not None:
             pixel_values = (
                 pixel_values if batched else tf.expand_dims(pixel_values, 0)
@@ -734,6 +817,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             pixel_values = x.get("pixel_values", None)
             pixel_position_ids = x.get("pixel_position_ids", None)
             images = x.get("images", None)
+            videos = x.get("videos", None)
             audio = x.get("audio", None)
             responses = x.get("responses", None)
             prompts = x["prompts"]
@@ -774,6 +858,17 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
                 f"{self.start_of_image_token}"
                 + self.image_placeholder * num_tokens
                 + f"{self.end_of_image_token}",
+            )
+
+        if self.video_converter is not None:
+            num_tokens = self.num_frames_per_video * self.num_vision_tokens_per_frame
+            vid_pattern = re.escape(self.video_placeholder)
+            prompts = tf.strings.regex_replace(
+                prompts,
+                vid_pattern,
+                f"{self.start_of_video_token}"
+                + self.video_placeholder * num_tokens
+                + f"{self.end_of_video_token}",
             )
 
         audio_mel = None
@@ -845,6 +940,11 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             pixel_values = vision_dict["pixel_values"]
             pixel_position_ids = vision_dict["pixel_position_ids"]
             vision_mask = token_ids == self.tokenizer.image_placeholder_id
+        elif videos is not None and self.video_converter is not None:
+            videos_dict = self._preprocess_videos(videos, batched)
+            pixel_values = videos_dict["pixel_values"]
+            pixel_position_ids = videos_dict["pixel_position_ids"]
+            vision_mask = token_ids == self._video_placeholder_id
         elif pixel_values is not None:
             pixel_values = (
                 pixel_values if batched else tf.expand_dims(pixel_values, 0)
@@ -918,7 +1018,9 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
                 "num_audio_tokens_per_clip": self.num_audio_tokens_per_clip,
                 "max_audio_clips_per_prompt": self.max_audio_clips_per_prompt,
                 "audio_input_feat_size": self.audio_input_feat_size,
-                "audio_converter": self.audio_converter,
+                "num_frames_per_video": self.num_frames_per_video,
+                "num_vision_tokens_per_frame": self.num_vision_tokens_per_frame,
+                "video_fps": self.video_fps,
             }
         )
         return config
@@ -984,6 +1086,14 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         tok_id = self.tokenizer.audio_placeholder_id
         if tok_id == -1 and self.audio_placeholder is not None:
             tok_id = self.tokenizer.token_to_id(self.audio_placeholder)
+        return tok_id
+
+    @property
+    def _video_placeholder_id(self):
+        """Real vocab ID for the video soft token."""
+        tok_id = self.tokenizer.video_placeholder_id
+        if tok_id == -1 and self.video_placeholder is not None:
+            tok_id = self.tokenizer.token_to_id(self.video_placeholder)
         return tok_id
 
     @property

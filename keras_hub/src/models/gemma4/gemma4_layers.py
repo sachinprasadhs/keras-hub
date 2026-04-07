@@ -189,6 +189,8 @@ class Gemma4InterleaveEmbeddings(keras.layers.Layer):
 
         batch_size, seq_length, embedding_dim = ops.shape(text_embeddings)
         max_images = ops.shape(image_embeddings)[1]
+        if max_images == 0:
+            return text_embeddings
 
         num_patches = ops.shape(image_embeddings)[2]
 
@@ -217,13 +219,13 @@ class Gemma4InterleaveEmbeddings(keras.layers.Layer):
         num_actual = valid_vision_indices.shape[1]
         if num_actual is None:  # fallback when shape is not static
             num_actual = ops.shape(valid_vision_indices)[1]
-        # Reshape to (B, all_tokens, H), clip, then flatten.
-        all_img = ops.reshape(
-            image_embeddings,
-            (batch_size, max_images * num_patches, embedding_dim),
-        )
+        # For video, each frame might produce more tokens than needed.
+        # We must slice EACH frame to the correct number of tokens before flattening!
+        # `num_actual` is the total number of valid soft tokens across all images.
+        num_patches_per_image = num_actual // max_images
+        sliced_img = image_embeddings[:, :, :num_patches_per_image, :]
         flat_image_embeddings = ops.reshape(
-            all_img[:, :num_actual, :],
+            sliced_img,
             (-1, embedding_dim),
         )
         vision_indices = ops.add(valid_vision_indices, to_add)

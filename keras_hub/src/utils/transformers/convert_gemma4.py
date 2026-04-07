@@ -60,7 +60,19 @@ def load_audio_converter_config(preset, transformers_config):
     }
 
 
-
+def load_video_converter_config(preset, transformers_config):
+    """Return Gemma4VideoConverter kwargs, or None if not a video model."""
+    processor_config = load_json(preset, "processor_config.json")
+    video_proc = processor_config.get("video_processor", {})
+    if not video_proc:
+        return None
+    
+    return {
+        "num_frames": video_proc["num_frames"],
+        "max_soft_tokens": video_proc["max_soft_tokens"],
+        "patch_size": video_proc["patch_size"],
+        "pooling_kernel_size": video_proc["pooling_kernel_size"],
+    }
 
 
 def convert_backbone_config(transformers_config):

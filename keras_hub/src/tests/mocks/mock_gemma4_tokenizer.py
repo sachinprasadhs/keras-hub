@@ -50,6 +50,9 @@ class MockGemma4Tokenizer(Tokenizer):
             "<|audio|>",
             "<|audio>",
             "<audio|>",
+            "<|video|>",
+            "<|video>",
+            "<video|>",
         ]
         self.string_to_id = tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(
@@ -75,6 +78,11 @@ class MockGemma4Tokenizer(Tokenizer):
         # Boundary tokens used in the preprocessor.
         self._add_special_token("<|image>", "start_of_image_token")
         self._add_special_token("<image|>", "end_of_image_token")
+
+        # Video tokens.
+        self._add_special_token("<|video|>", "video_placeholder")
+        self._add_special_token("<|video>", "start_of_video_token")
+        self._add_special_token("<video|>", "end_of_video_token")
 
         self.sequence_length = sequence_length
         self.add_bos = add_bos
@@ -129,6 +137,21 @@ class MockGemma4Tokenizer(Tokenizer):
             inputs,
             re.escape("<|audio|>"),
             " <|audio|> ",
+        )
+        inputs = tf.strings.regex_replace(
+            inputs,
+            re.escape("<|video>"),
+            " <|video> ",
+        )
+        inputs = tf.strings.regex_replace(
+            inputs,
+            re.escape("<video|>"),
+            " <video|> ",
+        )
+        inputs = tf.strings.regex_replace(
+            inputs,
+            re.escape("<|video|>"),
+            " <|video|> ",
         )
         inputs = tf.strings.regex_replace(inputs, "  ", " ")
         inputs = tf.strings.strip(inputs)

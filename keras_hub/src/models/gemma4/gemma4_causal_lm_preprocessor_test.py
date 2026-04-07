@@ -10,6 +10,7 @@ from keras_hub.src.models.gemma4.gemma4_image_converter import (
 )
 from keras_hub.src.tests.mocks.mock_gemma4_tokenizer import MockGemma4Tokenizer
 from keras_hub.src.tests.test_case import TestCase
+from keras_hub.src.models.gemma4.gemma4_video_converter import Gemma4VideoConverter
 
 
 class Gemma4CausalLMPreprocessorTest(TestCase):
@@ -207,6 +208,38 @@ class Gemma4CausalLMPreprocessorTest(TestCase):
                 "responses": ["hello", "", ""],
             }
             self.text_preprocessor(input_data)
+    def test_video_preprocessor_basics(self):
+        
+        video_converter = Gemma4VideoConverter(
+            patch_size=4,
+            num_frames=2,
+            max_soft_tokens=2,
+        )
+        init_video_kwargs = {
+            "tokenizer": self.tokenizer,
+            "video_converter": video_converter,
+            "sequence_length": 30,
+            "num_frames_per_video": 2,
+            "num_vision_tokens_per_frame": 2,
+        }
+        
+        input_data = {
+            "prompts": ["the quick brown fox <|video|>"],
+            "responses": ["round"],
+            "videos": np.ones((1, 2, 4, 4, 3), dtype="float32"),
+        }
+        
+        preprocessor = Gemma4CausalLMPreprocessor(**init_video_kwargs)
+        
+        output = preprocessor(input_data)
+        
+        self.assertIn("pixel_values", output[0])
+        self.assertIn("pixel_position_ids", output[0])
+        self.assertIn("vision_mask", output[0])
+        
+        import keras
+        vision_mask = output[0]["vision_mask"]
+        self.assertEqual(int(keras.ops.sum(vision_mask)), 4)
 
     @pytest.mark.kaggle_key_required
     @pytest.mark.extra_large
