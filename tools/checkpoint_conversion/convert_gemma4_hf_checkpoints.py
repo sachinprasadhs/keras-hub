@@ -416,7 +416,7 @@ def _test_audio_preprocessor(preprocessor, raw_audio, hf_input_features):
 
 
 
-def _test_numerics(backbone, keras_hub_inputs, hf_logits, hf_hidden_states=None):
+def _test_numerics(backbone, keras_hub_inputs, hf_logits, hf_hidden_states=None, final_logit_cap=None):
     if isinstance(keras_hub_inputs, tuple):
         print(f"DEBUG extracting first element from tuple")
         keras_hub_inputs = keras_hub_inputs[0]
@@ -474,6 +474,10 @@ def _test_numerics(backbone, keras_hub_inputs, hf_logits, hf_hidden_states=None)
             print(f"   Max absolute difference: {np.max(abs_diff_hs):.6f}")
 
     keras_hub_logits = backbone.token_embedding(keras_hub_output, reverse=True)
+    if final_logit_cap is not None:
+        keras_hub_logits = keras_hub_logits / final_logit_cap
+        keras_hub_logits = ops.tanh(keras_hub_logits)
+        keras_hub_logits = keras_hub_logits * final_logit_cap
     keras_hub_logits = ops.convert_to_numpy(keras_hub_logits).astype(np.float32)
 
     abs_diff = np.abs(keras_hub_logits - hf_logits)
@@ -655,7 +659,7 @@ def main(_):
         hf_data,
         keras_hub_tokenizer.image_placeholder_id,
     )
-    _test_numerics(keras_hub_backbone, keras_hub_inputs, hf_data["logits"])
+    _test_numerics(keras_hub_backbone, keras_hub_inputs, hf_data["logits"], final_logit_cap=final_logit_cap)
 
     print("DEBUG KerasHub weight names:")
     for w in keras_hub_backbone.weights:
