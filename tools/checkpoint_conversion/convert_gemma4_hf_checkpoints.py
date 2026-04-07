@@ -424,7 +424,18 @@ def _test_numerics(backbone, keras_hub_inputs, hf_logits, hf_hidden_states=None)
     print(f"DEBUG type(keras_hub_inputs): {type(keras_hub_inputs)}")
     if isinstance(keras_hub_inputs, dict):
         # Filter inputs to only include what the model expects
-        expected_names = [n.split(":")[0] for n in backbone.input_names]
+        expected_names = [
+            "token_ids",
+            "padding_mask",
+            "pixel_values",
+            "pixel_position_ids",
+            "position_ids",
+            "vision_indices",
+            "vision_mask",
+        ]
+        if getattr(backbone, "audio_encoder", None) is not None:
+            expected_names += ["audio_mel", "audio_mel_mask", "audio_indices", "audio_mask"]
+            
         keras_hub_inputs = {k: v for k, v in keras_hub_inputs.items() if k in expected_names}
         print(f"DEBUG filtered keras_hub_inputs keys: {list(keras_hub_inputs.keys())}")
         
