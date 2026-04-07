@@ -423,13 +423,11 @@ def _test_numerics(backbone, keras_hub_inputs, hf_logits, hf_hidden_states=None)
 
     print(f"DEBUG type(keras_hub_inputs): {type(keras_hub_inputs)}")
     if isinstance(keras_hub_inputs, dict):
-        print(f"DEBUG keras_hub_inputs keys: {list(keras_hub_inputs.keys())}")
-        for k, v in keras_hub_inputs.items():
-            try:
-                print(f"DEBUG   {k} shape: {v.shape}")
-            except Exception as e:
-                print(f"DEBUG   {k} has no shape or failed: {e}")
-    
+        # Filter inputs to only include what the model expects
+        expected_names = [n.split(":")[0] for n in backbone.input_names]
+        keras_hub_inputs = {k: v for k, v in keras_hub_inputs.items() if k in expected_names}
+        print(f"DEBUG filtered keras_hub_inputs keys: {list(keras_hub_inputs.keys())}")
+        
     keras_hub_output = backbone(keras_hub_inputs)
     
     # Truncate KerasHub output if it is longer than HF logits
