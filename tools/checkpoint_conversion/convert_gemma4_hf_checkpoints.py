@@ -591,7 +591,6 @@ def main(_):
     keras_dtype = "float32"
     keras_hub_backbone = keras_hub.models.Gemma4Backbone.from_preset(
         keras_hub_preset,
-        hidden_size_per_layer_input=256,
         dtype=keras_dtype,
     )
     print(f"DEBUG KerasHub hidden_size_per_layer_input: {keras_hub_backbone.hidden_size_per_layer_input}")
