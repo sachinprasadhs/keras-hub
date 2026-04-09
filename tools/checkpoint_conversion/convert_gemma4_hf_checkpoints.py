@@ -300,6 +300,13 @@ def _precompute_hf_outputs(
         ret["input_features"] = hf_inputs["input_features"].detach().cpu().numpy()
     if "mm_token_type_ids" in hf_inputs:
         ret["mm_token_type_ids"] = hf_inputs["mm_token_type_ids"].detach().cpu().numpy()
+    # For video: record how many frames HF actually sampled.
+    # Video processor uses "pixel_values_videos" (not "pixel_values").
+    # Its shape is (num_videos, num_frames, max_patches, patch_pixels) → 4D,
+    # so shape[1] is always the number of sampled frames.
+    if raw_video is not None and "pixel_values_videos" in hf_inputs:
+        pv = hf_inputs["pixel_values_videos"]
+        ret["num_video_frames"] = int(pv.shape[1])
     return ret
 
 
@@ -562,12 +569,25 @@ def _precompute_all_hf_outputs(
     hf_data_video = None
     if is_video_model and raw_video is not None:
         print("-> Precomputing HF outputs for video prompt...")
+        # Pre-subsample to processor's expected frame count so that HF stores
+        # frames_indices = [0, 1, ..., N-1].  When KH also receives these same
+        # N frames it uses sequential indices for timestamps, so both pipelines
+        # produce identical timestamp tokens (i / fps for i in 0..N-1).
+        hf_num_frames = getattr(processor.video_processor, "num_frames", 32)
+        T = raw_video.shape[0]
+        if T > hf_num_frames:
+            sub_indices = np.arange(0, T, T / hf_num_frames).astype(int)[:hf_num_frames]
+            raw_video_sub = raw_video[sub_indices]
+        else:
+            raw_video_sub = raw_video
         # HF expects channels-first (T, C, H, W).
-        raw_video_hf = np.transpose(raw_video, (0, 3, 1, 2))
+        raw_video_hf = np.transpose(raw_video_sub, (0, 3, 1, 2))
         hf_data_video = _precompute_hf_outputs(
             hf_model, hf_tokenizer, processor, PROMPT_VIDEO,
             raw_image=None, raw_audio=None, raw_video=raw_video_hf,
         )
+        # Store subsampled frames (channels-last) for KH verification.
+        hf_data_video["raw_video_sub"] = raw_video_sub
 
     return hf_data_text, hf_data_image, hf_data_audio, hf_data_video
 
@@ -627,20 +647,26 @@ def _verify_model(
         )
 
     if is_video_model and hf_data_video is not None:
-        # Video frames are processed as images, so each frame consumes
-        # num_vision_tokens_per_image soft tokens.  Compute the HF per-frame
-        # count and patch the same way we do for the image modality.
-        num_video_frames = raw_video.shape[0]
-        total_video_placeholder_tokens = int(
-            np.sum(hf_data_video["input_ids"][0] == tokenizer.image_placeholder_id)
-        )
-        actual_tokens_per_frame = total_video_placeholder_tokens // num_video_frames
-        preprocessor.num_vision_tokens_per_image = actual_tokens_per_frame
+        # Use the same pre-subsampled frames that were fed to HF.  Both
+        # pipelines then compute timestamps from sequential indices [0..N-1]
+        # so timestamp tokens align.  KH derives tokens-per-frame dynamically
+        # via _compute_video_n_tokens(), so no num_vision_tokens_per_image
+        # patching is needed here.
+        raw_video_sub = hf_data_video["raw_video_sub"]
+        hf_video_seq_len = hf_data_video["input_ids"].shape[1]
+        saved_num_frames_per_video = preprocessor.num_frames_per_video
+        # The packer trims at self.sequence_length before the per-call override
+        # is applied, so we must widen it to accommodate the full video sequence.
+        # Use +1 to avoid dropping the final trailing \n token.
+        saved_packer_seq_len = preprocessor.packer.sequence_length
+        preprocessor.num_frames_per_video = raw_video_sub.shape[0]
+        preprocessor.packer.sequence_length = hf_video_seq_len + 1
         _test_token_ids(
             "video", preprocessor, PROMPT_VIDEO,
-            hf_data_video["input_ids"], videos=raw_video,
+            hf_data_video["input_ids"], videos=raw_video_sub,
         )
-        preprocessor.num_vision_tokens_per_image = saved_num_tokens
+        preprocessor.num_frames_per_video = saved_num_frames_per_video
+        preprocessor.packer.sequence_length = saved_packer_seq_len
 
     # ── 3. Numerics / logit verification ──────────────────────────────────────
     print("\n--- Numerics Verification ---")
@@ -669,13 +695,19 @@ def _verify_model(
 
     # Video: KH video pipeline is consistent with KH image pipeline.
     if is_video_model and hf_data_video is not None:
-        preprocessor.num_vision_tokens_per_image = actual_tokens_per_frame
+        raw_video_sub = hf_data_video["raw_video_sub"]
+        hf_video_seq_len = hf_data_video["logits"].shape[1]
+        saved_num_frames_per_video = preprocessor.num_frames_per_video
+        saved_packer_seq_len = preprocessor.packer.sequence_length
+        preprocessor.num_frames_per_video = raw_video_sub.shape[0]
+        preprocessor.packer.sequence_length = hf_video_seq_len + 1
         kh_inputs_video = preprocessor(
-            {"prompts": [PROMPT_VIDEO], "videos": [raw_video], "responses": [""]},
-            sequence_length=hf_data_video["logits"].shape[1] + 1,
+            {"prompts": [PROMPT_VIDEO], "videos": [raw_video_sub], "responses": [""]},
+            sequence_length=hf_video_seq_len + 1,
         )
         _test_numerics("video (KH preproc)", backbone, kh_inputs_video, hf_data_video["logits"])
-        preprocessor.num_vision_tokens_per_image = saved_num_tokens
+        preprocessor.num_frames_per_video = saved_num_frames_per_video
+        preprocessor.packer.sequence_length = saved_packer_seq_len
 
     # ── 4. Generation comparison (all modalities) ─────────────────────────────
     print("\n--- Generation Comparison ---")
@@ -700,11 +732,17 @@ def _verify_model(
         )
 
     if is_video_model and hf_data_video is not None:
-        preprocessor.num_vision_tokens_per_image = actual_tokens_per_frame
+        raw_video_sub = hf_data_video["raw_video_sub"]
+        hf_video_seq_len = hf_data_video["input_ids"].shape[1]
+        saved_num_frames_per_video = preprocessor.num_frames_per_video
+        saved_packer_seq_len = preprocessor.packer.sequence_length
+        preprocessor.num_frames_per_video = raw_video_sub.shape[0]
+        preprocessor.packer.sequence_length = hf_video_seq_len
         _test_generate(
-            "video", gemma4_lm, PROMPT_VIDEO, hf_data_video["generated_text"], videos=raw_video
+            "video", gemma4_lm, PROMPT_VIDEO, hf_data_video["generated_text"], videos=raw_video_sub
         )
-        preprocessor.num_vision_tokens_per_image = saved_num_tokens
+        preprocessor.num_frames_per_video = saved_num_frames_per_video
+        preprocessor.packer.sequence_length = saved_packer_seq_len
 
     return gemma4_lm
 
