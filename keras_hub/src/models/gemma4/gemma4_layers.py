@@ -354,7 +354,7 @@ class Gemma4ClippableEinsumDense(keras.layers.Layer):
                 ops.cast(self.input_min, x.dtype),
                 ops.cast(self.input_max, x.dtype),
             )
-        x = self.dense(x)
+        x = ops.einsum(self.equation, x, self.dense.kernel)
         if self.use_clipped_linears:
             x = ops.clip(
                 x,

@@ -643,8 +643,6 @@ class Gemma4Backbone(Backbone):
         self.num_global_key_value_heads = num_global_key_value_heads
         self.hidden_size_per_layer_input = hidden_size_per_layer_input
         self.vocab_size_per_layer_input = vocab_size_per_layer_input
-        if self.hidden_size_per_layer_input > 0:
-            print(f"DEBUG: per_layer_token_embedding tracked: {self.per_layer_token_embedding in self.layers}")
         self.global_rope_wavelength = global_rope_wavelength
         self.local_rope_wavelength = local_rope_wavelength
         self.global_rope_partial_rotary_factor = (

@@ -363,6 +363,8 @@ class Gemma4CausalLM(CausalLM):
         return config
 
 
+
+
     def generate_step(self, inputs, stop_token_ids=[106]):
         """A compilable generation function for a single batch of inputs.
 
@@ -427,6 +429,7 @@ class Gemma4CausalLM(CausalLM):
                 vision_mask = ops.expand_dims(vision_mask, axis=0)
             if len(ops.shape(vision_indices)) == 1:
                 vision_indices = ops.expand_dims(vision_indices, axis=0)
+            
             img_embeddings = self.backbone.vision_encoder(
                 {
                     "pixel_values": pixel_values,
@@ -541,6 +544,7 @@ class Gemma4CausalLM(CausalLM):
         stop_token_ids="auto",
         strip_prompt=False,
     ):
+
         # If `auto`, add `<turn|>` as a stop token too.
         if self.preprocessor is None and stop_token_ids == "auto":
             raise ValueError(
@@ -563,3 +567,4 @@ class Gemma4CausalLM(CausalLM):
             stop_token_ids=stop_token_ids,
             strip_prompt=strip_prompt,
         )
+

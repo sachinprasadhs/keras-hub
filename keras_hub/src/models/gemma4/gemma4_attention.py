@@ -280,7 +280,11 @@ class Gemma4TextAttention(keras.layers.Layer):
         b, q_len, _, _, h = ops.shape(q)
 
         # Compute attention logits.
-        attention_logits = ops.einsum("btkgh,bskh->bkgts", q, k)
+        q_transposed = ops.transpose(q, (0, 2, 3, 1, 4))  # (b, k, g, t, h)
+        k_transposed = ops.transpose(k, (0, 2, 3, 1))  # (b, k, h, s)
+        k_expanded = ops.expand_dims(k_transposed, 2)  # (b, k, 1, h, s)
+        attention_logits = ops.matmul(q_transposed, k_expanded)  # (b, k, g, t, s)
+
         if self.logit_soft_cap is not None:
             attention_logits = ops.divide(attention_logits, self.logit_soft_cap)
             attention_logits = ops.multiply(
@@ -298,7 +302,10 @@ class Gemma4TextAttention(keras.layers.Layer):
                 attention_softmax, training=training
             )
 
-        results = ops.einsum("bkgts,bskh->btkgh", attention_softmax, v)
+        v_transposed = ops.transpose(v, (0, 2, 1, 3))  # (b, k, s, h)
+        v_expanded = ops.expand_dims(v_transposed, 2)  # (b, k, 1, s, h)
+        results = ops.matmul(attention_softmax, v_expanded)  # (b, k, g, t, h)
+        results = ops.transpose(results, (0, 3, 1, 2, 4))  # (b, t, k, g, h)
         return ops.reshape(results, (b, q_len, self.num_query_heads, h))
 
     def _compute_bidirectional_sliding_mask(self, batch_size, sequence_length):
@@ -681,7 +688,11 @@ class Gemma4VisionAttention(keras.layers.Layer):
         )
         b, q_len, _, _, h = ops.shape(q)
 
-        attention_logits = ops.einsum("btkgh,bskh->bkgts", q, k)
+        q_permuted = ops.transpose(q, (0, 2, 3, 1, 4))  # (B, K, G, T, H)
+        k_permuted = ops.transpose(k, (0, 2, 1, 3))  # (B, K, S, H)
+        k_transposed = ops.transpose(k_permuted, (0, 1, 3, 2))  # (B, K, H, S)
+        k_transposed = ops.expand_dims(k_transposed, axis=2)  # (B, K, 1, H, S)
+        attention_logits = ops.matmul(q_permuted, k_transposed)  # (B, K, G, T, S)
         if self.logit_soft_cap is not None:
             attention_logits = ops.divide(attention_logits, self.logit_soft_cap)
             attention_logits = ops.multiply(
@@ -690,16 +701,18 @@ class Gemma4VisionAttention(keras.layers.Layer):
 
         if attention_mask is not None:
             attention_mask = attention_mask[:, None, None, None, :]
-        orig_dtype = attention_logits.dtype
         attention_softmax = self.softmax(attention_logits, mask=attention_mask)
-        attention_softmax = ops.cast(attention_softmax, orig_dtype)
+        attention_softmax = ops.cast(attention_softmax, v.dtype)
 
         if self.dropout:
             attention_softmax = self.dropout_layer(
                 attention_softmax, training=training
             )
 
-        results = ops.einsum("bkgts,bskh->btkgh", attention_softmax, v)
+        v_permuted = ops.transpose(v, (0, 2, 1, 3))  # (B, K, S, H)
+        v_permuted = ops.expand_dims(v_permuted, axis=2)  # (B, K, 1, S, H)
+        results = ops.matmul(attention_softmax, v_permuted)  # (B, K, G, T, H)
+        results = ops.transpose(results, (0, 3, 1, 2, 4))  # (B, T, K, G, H)
         return ops.reshape(results, (b, q_len, self.num_query_heads, h))
 
     def call(self, x, attention_mask=None, position_ids=None, training=False):

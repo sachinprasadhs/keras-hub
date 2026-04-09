@@ -1,3 +1,4 @@
+import math
 import re
 
 import keras
@@ -27,8 +28,6 @@ from keras_hub.src.utils.tensor_utils import strip_to_ragged
 def _get_num_vision_tokens(
     h, w, patch_size, max_soft_tokens, pooling_kernel_size
 ):
-    import math
-
     total_px = h * w
     max_patches = max_soft_tokens * (pooling_kernel_size**2)
     target_px = max_patches * (patch_size**2)
@@ -54,22 +53,29 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
     """Gemma4 Causal LM preprocessor.
 
     This preprocessing layer is meant for use with
-    `keras_hub.models.Gemma4CausalLM`. It can be configured in two ways:
-    text-only and text + vision, based on whether the passed value of
-    `image_converter` is None. For the former, it takes in batches of strings,
-    whereas for the latter, it takes in batches of images and strings. It
-    returns outputs in a `(x, y, sample_weight)` format, where the `y` label is
-    the next token id in the `x` sequence. `sample_weight` is 0 for "prompt"
-    tokens, and 1 for "response" tokens, so that the loss is computed only on
+    `keras_hub.models.Gemma4CausalLM`. It can be configured in three modes:
+    text-only, text + image/video, and text + audio, based on whether
+    `image_converter`, `video_converter`, or `audio_converter` are provided.
+    It returns outputs in a `(x, y, sample_weight)` format, where the `y` label
+    is the next token id in the `x` sequence. `sample_weight` is 0 for "prompt"
+    tokens and 1 for "response" tokens, so that the loss is computed only on
     the "response" tokens.
 
-    For the text + vision case, this layer replaces instances of
-    `<|image>` token in the prompt with
-    `num_vision_tokens_per_image` placeholder tokens. It also returns indices
-    of where these vision tokens are present so that in the model, image
-    embeddings can be placed in the right position in the sequence of text
-    embeddings. Note that if `max_images_per_prompt` is 2, you can pass either
-    0, 1, or 2 images per sample. The value 0 corresponds to text-only input.
+    For image inputs, this layer replaces each `<|image|>` placeholder in the
+    prompt with `num_vision_tokens_per_image` soft tokens wrapped in
+    `<|image>...<image|>` markers. It also returns indices of where these
+    vision tokens are present so that image embeddings can be placed at the
+    correct positions in the sequence.
+
+    For video inputs, each `<|video|>` placeholder is replaced with a sequence
+    of per-frame blocks. Each block contains a timestamp and
+    `num_vision_tokens_per_frame` soft tokens wrapped in `<|image>...<image|>`
+    markers. The actual token count per frame is computed dynamically from the
+    input frame dimensions.
+
+    For audio inputs, each `<|audio|>` placeholder is expanded to the exact
+    number of audio tokens required for the clip, computed dynamically from the
+    mel-spectrogram length.
 
     For use with generation, the layer also exposes two methods
     `generate_preprocess()` and `generate_postprocess()`. When this preprocessor
@@ -80,26 +86,38 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
 
     Args:
         tokenizer: A `keras_hub.models.Gemma4Tokenizer` instance.
-        image_converter: A `keras_hub.layers.ImageConverter` instance. Defaults
-            to `None`.
-        sequence_length: The length of the packed inputs. Defaults to 1024.
-        add_start_token: If `True`, the preprocessor will prepend the tokenizer
-            start token to each input sequence. Defaults to `True`.
-        add_end_token: If `True`, the preprocessor will append the tokenizer
-            end token to each input sequence. Defaults to `True`.
-        max_images_per_prompt: int. Permissible number of images per sample in
-            the batch. Defaults to 2.
+        image_converter: A `keras_hub.layers.Gemma4ImageConverter` instance.
+            Defaults to `None`.
+        audio_converter: A `keras_hub.layers.Gemma4AudioConverter` instance.
+            Defaults to `None`.
+        video_converter: A `keras_hub.layers.Gemma4VideoConverter` instance.
+            Defaults to `None`.
+        sequence_length: int. The length of the packed inputs. Defaults to
+            `1024`.
+        add_start_token: bool. If `True`, the preprocessor will prepend the
+            tokenizer start token to each input sequence. Defaults to `True`.
+        add_end_token: bool. If `True`, the preprocessor will append the
+            tokenizer end token to each input sequence. Defaults to `True`.
+        max_images_per_prompt: int. Maximum number of images per sample in
+            the batch. Defaults to `2`.
         num_vision_tokens_per_image: int. Number of vision placeholder tokens
-            per image. Defaults to 280.
-        audio_converter: A `keras_hub.layers.AudioConverter` instance. Defaults
-            to `None`.
-        max_audio_clips_per_prompt: int. Permissible number of audio clips per
-            sample in the batch. Defaults to 1.
+            per image. Defaults to `280`.
+        max_audio_clips_per_prompt: int. Maximum number of audio clips per
+            sample in the batch. Defaults to `1`.
         num_audio_tokens_per_clip: int. Legacy parameter, no longer used for
             token calculation as audio expansion is now fully dynamic. Defaults
-            to 750.
+            to `750`.
         audio_input_feat_size: int. Number of mel-spectrogram frequency bins.
-            Defaults to 128.
+            Defaults to `128`.
+        num_frames_per_video: int. Number of frames sampled from each video.
+            Defaults to `32`.
+        num_vision_tokens_per_frame: int. Fallback number of vision placeholder
+            tokens per video frame, used when a video converter is configured
+            but no video input is provided. The actual count is computed
+            dynamically from frame dimensions when videos are present. Defaults
+            to `70`.
+        video_fps: float. Frames-per-second used to compute per-frame
+            timestamps in the expanded prompt. Defaults to `24.0`.
     """
 
     backbone_cls = Gemma4Backbone
@@ -124,7 +142,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         audio_input_feat_size=128,
         num_frames_per_video=32,
         num_vision_tokens_per_frame=70,
-        video_fps=1.0,
+        video_fps=24.0,
         **kwargs,
     ):
         super().__init__(
@@ -208,8 +226,17 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         )
         self.built = True
 
-    def _get_vision_indices(self, vision_mask):
-        """Computes indices given vision mask, and pads with 0."""
+    def _get_vision_indices(self, vision_mask, max_tokens=None):
+        """Computes indices given vision mask, and pads with 0.
+
+        Args:
+            vision_mask: Bool tensor of shape ``[B, S]``.
+            max_tokens: Fixed output width (number of vision slots per sample).
+                When provided, the result is always padded/truncated to this
+                length, ensuring a static second dimension across all batches
+                (required for XLA compilation and consistent batching).
+                When ``None``, pads to the maximum actual count in the batch.
+        """
         batch_size, sequence_length = vision_mask.shape
 
         vision_mask_flattened = tf.reshape(vision_mask, [-1])
@@ -239,13 +266,12 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             tf.expand_dims(to_subtract, axis=-1),
         )
 
-        # Pad the indices.
+        # Pad to `max_tokens` when specified (fixed capacity for all batches),
+        # otherwise pad to the maximum actual count in this batch.
+        pad_shape = [None, max_tokens] if max_tokens is not None else None
         batched_vision_indices = batched_vision_indices.to_tensor(
-            shape=[
-                batch_size,
-                self.max_images_per_prompt * self.num_vision_tokens_per_image,
-            ],
             default_value=0,
+            shape=pad_shape,
         )
         return batched_vision_indices
 
@@ -336,7 +362,26 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
                 dtype=tf.int32,
             )
         else:
-            vision_indices = self._get_vision_indices(vision_mask=vision_mask)
+            # Pad to a fixed capacity so all batches have the same shape.
+            # For images: max_images_per_prompt × tokens_per_image.
+            # For videos: num_frames × max_soft_tokens from the converter
+            #   (authoritative upper bound; avoids dependence on the separate
+            #   `num_vision_tokens_per_frame` fallback parameter).
+            if self.video_converter is not None:
+                max_vision_tokens = (
+                    self.num_frames_per_video
+                    * self.video_converter.max_soft_tokens
+                )
+            elif self.image_converter is not None:
+                max_vision_tokens = (
+                    self.max_images_per_prompt
+                    * self.num_vision_tokens_per_image
+                )
+            else:
+                max_vision_tokens = None
+            vision_indices = self._get_vision_indices(
+                vision_mask=vision_mask, max_tokens=max_vision_tokens
+            )
 
         if pixel_values is None:
             pixel_values = tf.zeros((batch_size, 0, 16, 48), dtype="float32")
@@ -420,31 +465,34 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             return x
 
     def _preprocess_images(self, images, batched):
-        if isinstance(images, (list, np.ndarray)):
+        if isinstance(images, np.ndarray):
+            images = tf.convert_to_tensor(images)
+        elif isinstance(images, list):
             images = tf.ragged.constant(images)
-        elif isinstance(images, tf.RaggedTensor):
-            pass
+        elif not isinstance(images, (tf.Tensor, tf.RaggedTensor)):
+            images = tf.convert_to_tensor(images)
+
+        if isinstance(images, tf.RaggedTensor):
+            if not batched:
+                images = tf.expand_dims(images, axis=0)
+            if len(images.shape) == 4:
+                images = tf.expand_dims(images, axis=1)
+            images = images.to_tensor(
+                shape=[None, self.max_images_per_prompt, None, None, 3],
+                default_value=0,
+            )
         elif isinstance(images, tf.Tensor):
-            images = tf.RaggedTensor.from_tensor(images)
+            if not batched:
+                images = tf.expand_dims(images, axis=0)
+            if len(images.shape) == 3:
+                images = tf.expand_dims(images, axis=0)
+            if len(images.shape) == 4:
+                images = tf.expand_dims(images, axis=1)
         else:
-            try:
-                images = tf.RaggedTensor.from_tensor(images)
-            except Exception:  # noqa: BLE001
-                raise ValueError(
-                    "`images` should be a list, ragged tensor, or dense tensor."
-                    f" Received: `type(images)` = {type(images)}"
-                )
-
-        if not batched:
-            images = tf.expand_dims(images, axis=0)
-
-        if len(images.shape) == 4:
-            images = tf.expand_dims(images, axis=1)
-
-        images = images.to_tensor(
-            shape=[None, self.max_images_per_prompt, None, None, 3],
-            default_value=0,
-        )
+            raise ValueError(
+                "`images` should be a list, ragged tensor, or dense tensor."
+                f" Received: `type(images)` = {type(images)}"
+            )
 
         original_images_shape = tf.shape(images)
         images = tf.reshape(
@@ -470,7 +518,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             pixel_values,
             [
                 original_images_shape[0],
-                self.max_images_per_prompt,
+                original_images_shape[1],
                 -1,
                 self.image_converter.patch_size**2 * 3,
             ],
@@ -479,7 +527,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             pixel_position_ids,
             [
                 original_images_shape[0],
-                self.max_images_per_prompt,
+                original_images_shape[1],
                 -1,
                 2,
             ],
@@ -533,25 +581,27 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         return mel, mask
 
     def _preprocess_videos(self, videos, batched):
-        if isinstance(videos, (list, np.ndarray)):
+        if "jax" in str(type(videos)):
+            videos = tf.convert_to_tensor(np.array(videos))
+        elif "torch.Tensor" in str(type(videos)):
+            videos = tf.convert_to_tensor(videos.detach().cpu().float().numpy())
+        elif isinstance(videos, np.ndarray):
+            videos = tf.convert_to_tensor(videos)
+        elif isinstance(videos, list):
             videos = tf.ragged.constant(videos)
-        elif isinstance(videos, tf.RaggedTensor):
-            pass
-        elif isinstance(videos, tf.Tensor):
-            videos = tf.RaggedTensor.from_tensor(videos)
-        else:
-            try:
-                videos = tf.RaggedTensor.from_tensor(videos)
-            except Exception:  # noqa: BLE001
-                raise ValueError(
-                    "`videos` should be a list, ragged tensor, or dense tensor."
-                    f" Received: `type(videos)` = {type(videos)}"
-                )
 
-        if not batched:
+        if isinstance(videos, tf.RaggedTensor):
+            if not batched:
+                videos = tf.expand_dims(videos, axis=0)
+            videos = videos.to_tensor(default_value=0)
+        elif not isinstance(videos, tf.Tensor):
+            raise ValueError(
+                "`videos` should be a list, ragged tensor, or dense tensor."
+                f" Received: `type(videos)` = {type(videos)}"
+            )
+        
+        if len(videos.shape) == 4:
             videos = tf.expand_dims(videos, axis=0)
-
-        videos = videos.to_tensor(default_value=0)
         
         videos_dict = self.video_converter.call(videos)
         pixel_values = videos_dict["pixel_values"]
@@ -567,6 +617,47 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             "pixel_values": pixel_values,
             "pixel_position_ids": pixel_position_ids,
         }
+
+    def _compute_video_n_tokens(self, videos):
+        """Return the actual number of vision tokens per frame for this input.
+
+        Derives H and W from the raw video tensor and calls
+        `_get_num_vision_tokens` so that the prompt expansion matches the
+        number of patches the video converter will actually produce.
+        """
+        # Drill down through list-of-videos to the first array-like leaf.
+        v = videos
+        while isinstance(v, (list, tuple)):
+            v = v[0]
+
+        if isinstance(v, np.ndarray):
+            shape = v.shape
+        elif hasattr(v, "numpy"):  # eager tf.Tensor / torch.Tensor
+            shape = v.numpy().shape
+        elif hasattr(v, "shape"):  # symbolic tf.Tensor or torch.Tensor
+            shape = tuple(int(d) for d in v.shape)
+        else:
+            raise ValueError(
+                f"Cannot determine video frame dimensions from input of "
+                f"type {type(v)}. Expected a numpy array, tf.Tensor, or "
+                f"torch.Tensor."
+            )
+
+        # Accepted shapes: (H,W,C), (F,H,W,C), (B,F,H,W,C)
+        if len(shape) < 3:
+            raise ValueError(
+                f"Video input has unexpected shape {shape}. Expected at "
+                f"least 3 dimensions (..., H, W, C)."
+            )
+        h, w = int(shape[-3]), int(shape[-2])
+
+        return _get_num_vision_tokens(
+            h,
+            w,
+            self.video_converter.patch_size,
+            self.video_converter.max_soft_tokens,
+            self.video_converter.pooling_kernel_size,
+        )
 
     @preprocessing_function
     def call(
@@ -619,7 +710,11 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             )
 
         if self.video_converter is not None:
-            n_tokens = self.num_vision_tokens_per_frame
+            n_tokens = (
+                self._compute_video_n_tokens(videos)
+                if videos is not None
+                else self.num_vision_tokens_per_frame
+            )
             vid_pattern = re.escape(self.video_placeholder)
             frames = []
             for i in range(self.num_frames_per_video):
@@ -628,7 +723,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
                 ss = int(seconds % 60)
                 timestamp = f"{mm:02d}:{ss:02d}"
                 frames.append(
-                    f"{timestamp} <|image>{self.video_placeholder * n_tokens}<image|>"
+                    f"{timestamp} <|image>{'<|video|>' * n_tokens}<image|>"
                 )
             replacement = " ".join(frames)
             prompts = tf.strings.regex_replace(
@@ -760,7 +855,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             videos_dict = self._preprocess_videos(videos, batched)
             pixel_values = videos_dict["pixel_values"]
             pixel_position_ids = videos_dict["pixel_position_ids"]
-            vision_mask = token_ids == self._video_placeholder_id
+            vision_mask = token_ids == self.tokenizer.video_placeholder_id
         elif pixel_values is not None:
             pixel_values = (
                 pixel_values if batched else tf.expand_dims(pixel_values, 0)
@@ -825,6 +920,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             pixel_values = None
             pixel_position_ids = None
             images = None
+            videos = None
             audio = None
             responses = None
             prompts = x
@@ -861,14 +957,26 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             )
 
         if self.video_converter is not None:
-            num_tokens = self.num_frames_per_video * self.num_vision_tokens_per_frame
+            n_tokens = (
+                self._compute_video_n_tokens(videos)
+                if videos is not None
+                else self.num_vision_tokens_per_frame
+            )
             vid_pattern = re.escape(self.video_placeholder)
+            frames = []
+            for i in range(self.num_frames_per_video):
+                seconds = i / self.video_fps
+                mm = int(seconds // 60)
+                ss = int(seconds % 60)
+                timestamp = f"{mm:02d}:{ss:02d}"
+                frames.append(
+                    f"{timestamp} <|image>{'<|video|>' * n_tokens}<image|>"
+                )
+            replacement = " ".join(frames)
             prompts = tf.strings.regex_replace(
                 prompts,
                 vid_pattern,
-                f"{self.start_of_video_token}"
-                + self.video_placeholder * num_tokens
-                + f"{self.end_of_video_token}",
+                replacement,
             )
 
         audio_mel = None
@@ -944,7 +1052,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             videos_dict = self._preprocess_videos(videos, batched)
             pixel_values = videos_dict["pixel_values"]
             pixel_position_ids = videos_dict["pixel_position_ids"]
-            vision_mask = token_ids == self._video_placeholder_id
+            vision_mask = token_ids == self.tokenizer.video_placeholder_id
         elif pixel_values is not None:
             pixel_values = (
                 pixel_values if batched else tf.expand_dims(pixel_values, 0)
@@ -1013,6 +1121,15 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
         config = super().get_config()
         config.update(
             {
+                "image_converter": None
+                if self.image_converter is None
+                else keras.layers.serialize(self.image_converter),
+                "audio_converter": None
+                if self.audio_converter is None
+                else keras.layers.serialize(self.audio_converter),
+                "video_converter": None
+                if self.video_converter is None
+                else keras.layers.serialize(self.video_converter),
                 "num_vision_tokens_per_image": self.num_vision_tokens_per_image,
                 "max_images_per_prompt": self.max_images_per_prompt,
                 "num_audio_tokens_per_clip": self.num_audio_tokens_per_clip,
@@ -1024,6 +1141,23 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             }
         )
         return config
+
+    @classmethod
+    def from_config(cls, config):
+        config.update(
+            {
+                "image_converter": None
+                if config.get("image_converter") is None
+                else keras.layers.deserialize(config["image_converter"]),
+                "audio_converter": None
+                if config.get("audio_converter") is None
+                else keras.layers.deserialize(config["audio_converter"]),
+                "video_converter": None
+                if config.get("video_converter") is None
+                else keras.layers.deserialize(config["video_converter"]),
+            }
+        )
+        return super().from_config(config)
 
     @preprocessing_function
     def generate_postprocess(

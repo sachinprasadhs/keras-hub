@@ -1459,6 +1459,7 @@ class Gemma4AudioEncoder(keras.Model):
                 dtype=dtype,
                 name="output_proj",
             )
+            self.output_proj.build((None, None, self.hidden_size))
         else:
             self.output_proj = None
 
@@ -1470,6 +1471,10 @@ class Gemma4AudioEncoder(keras.Model):
             dtype=dtype,
             name="audio_output_projection",
         )
+        _audio_proj_in = (
+            output_proj_dims if output_proj_dims is not None else hidden_size
+        )
+        self.audio_output_projection.build((None, None, _audio_proj_in))
         self.output_norm = Gemma4VNorm(
             epsilon=norm_eps,
             dtype=dtype,
@@ -1484,6 +1489,9 @@ class Gemma4AudioEncoder(keras.Model):
         w_idx = np.arange(chunk_size)[:, None]  # (W, 1)
         c_idx = np.arange(C)[None, :]  # (1, C)
         self._causal_valid_mask_np = (c_idx <= w_idx + max_past) & (c_idx > w_idx)
+
+    def build(self, input_shape):
+        self.built = True
 
     def call(self, audio_mel, audio_mel_mask):
         """Encode a batch of mel spectrograms.

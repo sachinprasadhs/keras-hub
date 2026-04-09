@@ -13,27 +13,67 @@ from keras_hub.src.utils.preset_utils import load_json
 backbone_cls = Gemma4Backbone
 
 
+def _compute_scale_offset(proc_cfg, section_name):
+    """Compute KH scale/offset from HF processor do_rescale/do_normalize flags.
+
+    KH applies: output = input * scale + offset
+    HF applies:
+        1. Rescale (if do_rescale): x = x * rescale_factor
+        2. Normalize (if do_normalize): x = (x - mean) / std
+    Combined:   scale = rescale_factor / std,  offset = -mean / std
+
+    If neither flag is set the transform is identity (scale=None, offset=None).
+    If do_resize=False an error is raised because Gemma4ImageConverter always
+    resizes; this configuration is not supported.
+    """
+    do_rescale = proc_cfg["do_rescale"]
+    do_normalize = proc_cfg["do_normalize"]
+    do_resize = proc_cfg["do_resize"]
+
+    if not do_resize:
+        raise ValueError(
+            f"{section_name}: do_resize=False is not supported by "
+            "Gemma4ImageConverter, which always applies aspect-ratio-"
+            "preserving resize."
+        )
+
+    if not do_rescale and not do_normalize:
+        return None, None
+
+    effective_rescale = proc_cfg["rescale_factor"] if do_rescale else 1.0
+    effective_mean = proc_cfg["image_mean"] if do_normalize else [0.0, 0.0, 0.0]
+    effective_std = proc_cfg["image_std"] if do_normalize else [1.0, 1.0, 1.0]
+
+    scale = [(effective_rescale / s) for s in effective_std]
+    offset = [(-m / s) for m, s in zip(effective_mean, effective_std)]
+    return scale, offset
+
+
 def load_image_converter_config(preset, transformers_config):
     """Return kwargs for Gemma4ImageConverter, or None for text-only models."""
     if "vision_config" not in transformers_config:
         return None
 
     processor_config = load_json(preset, "processor_config.json")
-    image_processor = processor_config.get("image_processor", processor_config)
-    mean = image_processor["image_mean"]
-    std = image_processor["image_std"]
-    rescale_factor = image_processor.get("rescale_factor", 1.0 / 255.0)
-
-    offset = [(-m / s) for m, s in zip(mean, std)]
-    scale = [(rescale_factor / s) for s in std]
+    image_processor = processor_config["image_processor"]
+    scale, offset = _compute_scale_offset(image_processor, "image_processor")
 
     vision_config = transformers_config["vision_config"]
-    image_size = vision_config.get("image_size", 896)
-    patch_size = vision_config.get("patch_size", 14)
+    # image_size is not present in the HF vision_config; 896 is the fixed
+    # positional-embedding size used across all Gemma4 vision checkpoints
+    # (matches the hardcoded value in convert_backbone_config).
+    image_size = 896
+    patch_size = vision_config["patch_size"]
+    # max_soft_tokens lives in the image_processor section of processor_config;
+    # vision_soft_tokens_per_image in the model config is the authoritative cap.
+    max_soft_tokens = image_processor["max_soft_tokens"]
+    pooling_kernel_size = vision_config["pooling_kernel_size"]
 
     return {
         "image_size": (image_size, image_size),
         "patch_size": patch_size,
+        "max_soft_tokens": max_soft_tokens,
+        "pooling_kernel_size": pooling_kernel_size,
         "scale": scale,
         "offset": offset,
     }
@@ -43,10 +83,10 @@ def load_audio_converter_config(preset, transformers_config):
     """Return Gemma4AudioConverter kwargs, or None for text/vision models."""
     if "audio_config" not in transformers_config:
         return None
-        
+
     processor_config = load_json(preset, "processor_config.json")
-    feature_extractor = processor_config.get("feature_extractor", {})
-    
+    feature_extractor = processor_config["feature_extractor"]
+
     # Map HF keys to KerasHub keys
     return {
         "num_mels": feature_extractor["feature_size"],
@@ -63,15 +103,39 @@ def load_audio_converter_config(preset, transformers_config):
 def load_video_converter_config(preset, transformers_config):
     """Return Gemma4VideoConverter kwargs, or None if not a video model."""
     processor_config = load_json(preset, "processor_config.json")
-    video_proc = processor_config.get("video_processor", {})
-    if not video_proc:
+    if "video_processor" not in processor_config:
         return None
-    
+
+    video_proc = processor_config["video_processor"]
+    scale, offset = _compute_scale_offset(video_proc, "video_processor")
+
     return {
         "num_frames": video_proc["num_frames"],
         "max_soft_tokens": video_proc["max_soft_tokens"],
         "patch_size": video_proc["patch_size"],
         "pooling_kernel_size": video_proc["pooling_kernel_size"],
+        "scale": scale,
+        "offset": offset,
+    }
+
+
+def load_preprocessor_config(preset, transformers_config):
+    """Return extra Gemma4CausalLMPreprocessor kwargs from processor_config."""
+    processor_config = load_json(preset, "processor_config.json")
+    if "video_processor" not in processor_config:
+        return {}
+
+    video_proc = processor_config["video_processor"]
+    # do_sample_frames=True means the processor samples num_frames from the
+    # full video. KH's VideoConverter always samples; if this flag is ever
+    # False, frames are expected to be pre-sampled by the caller and num_frames
+    # is ignored at runtime (the converter still linspaces over whatever it
+    # receives, but total_frames == num_frames so the result is identical).
+    return {
+        "num_frames_per_video": video_proc["num_frames"],
+        "num_vision_tokens_per_frame": video_proc["max_soft_tokens"],
+        # video_fps is not stored in HF configs; 24.0 matches the HF default.
+        "video_fps": 24.0,
     }
 
 
@@ -850,6 +914,7 @@ def convert_tokenizer(cls, preset, **kwargs):
         proto=proto,
         has_vision_tokens=has_vision_tokens,
         has_audio_tokens=has_audio_tokens,
+        has_video_tokens=True,
         **kwargs,
     )
 
@@ -884,6 +949,11 @@ def _build_sentencepiece_proto(tokenizer_config):
         added_token_strings.add(content)
         if token_info.get("special", False):
             special_token_strings.add(content)
+
+    # Manually add video token if missing (needed for Gemma4 video models)
+    if "<|video|>" not in vocab and "<|video|>" not in added_token_strings:
+        vocab["<|video|>"] = 258884
+        added_token_strings.add("<|video|>")
 
     # Map each merge result → rank so we can assign piece scores.
     merge_result_rank = {}

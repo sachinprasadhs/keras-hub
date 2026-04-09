@@ -16,7 +16,7 @@ START_OF_AUDIO_TOKEN = "<|audio>"
 AUDIO_PLACEHOLDER_TOKEN = "<|audio|>"
 END_OF_AUDIO_TOKEN = "<audio|>"
 
-# Gemma4 video token strings — mirror the image pattern.
+# Gemma4 video token strings
 START_OF_VIDEO_TOKEN = "<|video>"
 VIDEO_PLACEHOLDER_TOKEN = "<|video|>"
 END_OF_VIDEO_TOKEN = "<video|>"
@@ -48,6 +48,15 @@ class Gemma4Tokenizer(SentencePieceTokenizer):
             `bytes` object with a serialized SentencePiece proto. See the
             [SentencePiece repository](https://github.com/google/sentencepiece)
             for more details on the format.
+        has_vision_tokens: bool. If `True`, register special vision tokens
+            (`<|image|>`, `<|image>`, `<image|>`) and expose
+            `image_placeholder_id`. Defaults to `True`.
+        has_audio_tokens: bool. If `True`, register special audio tokens
+            (`<|audio|>`, `<|audio>`, `<audio|>`) and expose
+            `audio_placeholder_id`. Defaults to `False`.
+        has_video_tokens: bool. If `True`, register special video tokens
+            (`<|video|>`, `<|video>`, `<video|>`) and expose
+            `video_placeholder_id`. Defaults to `True`.
 
     Examples:
 
@@ -69,7 +78,7 @@ class Gemma4Tokenizer(SentencePieceTokenizer):
     backbone_cls = Gemma4Backbone
 
     def __init__(
-        self, proto, has_vision_tokens=True, has_audio_tokens=False, has_video_tokens=False, **kwargs
+        self, proto, has_vision_tokens=True, has_audio_tokens=False, has_video_tokens=True, **kwargs
     ):
         self.has_vision_tokens = has_vision_tokens
         self.has_audio_tokens = has_audio_tokens
@@ -114,9 +123,9 @@ class Gemma4Tokenizer(SentencePieceTokenizer):
             self.end_of_audio_token_id = -1
 
         if has_video_tokens:
-            self._add_special_token(START_OF_VIDEO_TOKEN, "start_of_video_token")
             self._add_special_token(VIDEO_PLACEHOLDER_TOKEN, "video_placeholder")
-            self._add_special_token(END_OF_VIDEO_TOKEN, "end_of_video_token")
+            self.start_of_video_token_id = -1
+            self.end_of_video_token_id = -1
         else:
             self.start_of_video_token_id = -1
             self.video_placeholder_id = -1

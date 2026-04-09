@@ -239,7 +239,9 @@ class Gemma4CausalLMPreprocessorTest(TestCase):
         
         import keras
         vision_mask = output[0]["vision_mask"]
-        self.assertEqual(int(keras.ops.sum(vision_mask)), 4)
+        # 2 frames × 1 token per frame: a 4×4 frame with patch_size=4 and
+        # max_soft_tokens=2 produces 1 visible token per frame.
+        self.assertEqual(int(keras.ops.sum(vision_mask)), 2)
 
     @pytest.mark.kaggle_key_required
     @pytest.mark.extra_large

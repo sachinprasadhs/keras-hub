@@ -473,17 +473,14 @@ class Gemma4TextDecoderBlock(keras.layers.Layer):
             dense_out = self.post_ffw_norm_dense(dense_out)
 
             # MoE path: router uses raw x; expert bank uses pre_ffw_norm_moe(x)
+            # Router returns sparse dispatch_weights [T, E] (k non-zero per row).
             dispatch_weights = self.moe_router(x)  # [T, E]
             moe_in = self.pre_ffw_norm_moe(x)
             # Flatten for expert bank.
             shape = ops.shape(moe_in)
             moe_in_flat = ops.reshape(moe_in, (-1, shape[-1]))  # [T, H]
-            expert_out = self.moe_expert_bank(moe_in_flat)  # [E, T, H]
-            # Weighted sum: dispatch_weights [T, E] → [E, T] for broadcasting.
-            dw = ops.transpose(
-                ops.cast(dispatch_weights, expert_out.dtype), (1, 0)
-            )  # [E, T]
-            moe_out = ops.sum(expert_out * dw[:, :, None], axis=0)  # [T, H]
+            # Single batched GEMM across all experts; sparse combine via dw.
+            moe_out = self.moe_expert_bank(moe_in_flat, dispatch_weights)  # [T, H]
             moe_out = ops.reshape(moe_out, shape)  # [B, S, H]
             moe_out = self.post_ffw_norm_moe_path(moe_out)
 
