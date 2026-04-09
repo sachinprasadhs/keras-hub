@@ -627,10 +627,20 @@ def _verify_model(
         )
 
     if is_video_model and hf_data_video is not None:
+        # Video frames are processed as images, so each frame consumes
+        # num_vision_tokens_per_image soft tokens.  Compute the HF per-frame
+        # count and patch the same way we do for the image modality.
+        num_video_frames = raw_video.shape[0]
+        total_video_placeholder_tokens = int(
+            np.sum(hf_data_video["input_ids"][0] == tokenizer.image_placeholder_id)
+        )
+        actual_tokens_per_frame = total_video_placeholder_tokens // num_video_frames
+        preprocessor.num_vision_tokens_per_image = actual_tokens_per_frame
         _test_token_ids(
             "video", preprocessor, PROMPT_VIDEO,
             hf_data_video["input_ids"], videos=raw_video,
         )
+        preprocessor.num_vision_tokens_per_image = saved_num_tokens
 
     # ── 3. Numerics / logit verification ──────────────────────────────────────
     print("\n--- Numerics Verification ---")
@@ -659,11 +669,13 @@ def _verify_model(
 
     # Video: KH video pipeline is consistent with KH image pipeline.
     if is_video_model and hf_data_video is not None:
+        preprocessor.num_vision_tokens_per_image = actual_tokens_per_frame
         kh_inputs_video = preprocessor(
             {"prompts": [PROMPT_VIDEO], "videos": [raw_video], "responses": [""]},
             sequence_length=hf_data_video["logits"].shape[1] + 1,
         )
         _test_numerics("video (KH preproc)", backbone, kh_inputs_video, hf_data_video["logits"])
+        preprocessor.num_vision_tokens_per_image = saved_num_tokens
 
     # ── 4. Generation comparison (all modalities) ─────────────────────────────
     print("\n--- Generation Comparison ---")
@@ -688,9 +700,11 @@ def _verify_model(
         )
 
     if is_video_model and hf_data_video is not None:
+        preprocessor.num_vision_tokens_per_image = actual_tokens_per_frame
         _test_generate(
             "video", gemma4_lm, PROMPT_VIDEO, hf_data_video["generated_text"], videos=raw_video
         )
+        preprocessor.num_vision_tokens_per_image = saved_num_tokens
 
     return gemma4_lm
 
