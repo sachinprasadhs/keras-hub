@@ -235,33 +235,64 @@ def _precompute_hf_outputs(
                 [mm_pad, hf_inputs["mm_token_type_ids"]], dim=1
             )
 
+    # Register forward hooks to capture encoder outputs (at text hidden size)
+    # during the main forward pass.  These are later used for encoder-level
+    # diagnostics and for the "HF encoder injected" numeric tests.
+    _encoder_captures = {}
+    _hooks = []
+    _hf_model_inner = getattr(hf_model, "model", None)
+    if _hf_model_inner is not None:
+        if "input_features" in hf_inputs and hasattr(_hf_model_inner, "embed_audio"):
+            def _audio_hook(mod, inp, out):
+                _encoder_captures["audio"] = out.detach().cpu().float().numpy()
+            _hooks.append(
+                _hf_model_inner.embed_audio.register_forward_hook(_audio_hook)
+            )
+        if raw_video is not None and hasattr(_hf_model_inner, "embed_image"):
+            _video_frame_embeds = []
+            def _video_hook(mod, inp, out):
+                _video_frame_embeds.append(out.detach().cpu().float().numpy())
+            _hooks.append(
+                _hf_model_inner.embed_image.register_forward_hook(_video_hook)
+            )
+
     with torch.no_grad():
         hf_outputs = hf_model(**hf_inputs, output_hidden_states=False)
+
+    for h in _hooks:
+        h.remove()
+    _hooks.clear()
 
     hf_logits = hf_outputs.logits.detach().cpu().float().numpy()
     hf_input_ids = hf_inputs["input_ids"].detach().cpu().numpy()
     hf_attention_mask = hf_inputs["attention_mask"].detach().cpu().numpy()
 
-    # Extract raw audio encoder features for the audio mel comparison.
+    # Capture audio embeddings (after embed_audio projection, at text hidden dim).
+    # These are equivalent to KH's audio_encoder full output and are used for
+    # encoder-level diagnostics and HF-encoder-injected numeric tests.
+    hf_audio_embeddings = _encoder_captures.get("audio")  # (1, T_audio, H) or None
+
+    # For backwards-compat: also keep the raw audio mel features for the
+    # mel-spectrogram comparison test.
     hf_audio_features = None
     if "input_features" in hf_inputs:
         with torch.no_grad():
-            if hasattr(hf_model, "audio_encoder"):
-                hf_audio_features = hf_model.audio_encoder(
-                    hf_inputs["input_features"]
-                )
-            elif hasattr(hf_model, "model") and hasattr(
-                hf_model.model, "audio_tower"
-            ):
-                hf_audio_features = hf_model.model.audio_tower(
-                    hf_inputs["input_features"]
-                )
-            if hf_audio_features is not None:
-                if hasattr(hf_audio_features, "last_hidden_state"):
-                    hf_audio_features = hf_audio_features.last_hidden_state
-                hf_audio_features = (
-                    hf_audio_features.detach().cpu().float().numpy()
-                )
+            if hasattr(hf_model, "model") and hasattr(hf_model.model, "audio_tower"):
+                hf_af = hf_model.model.audio_tower(hf_inputs["input_features"])
+                if hasattr(hf_af, "last_hidden_state"):
+                    hf_af = hf_af.last_hidden_state
+                hf_audio_features = hf_af.detach().cpu().float().numpy()
+
+    # Capture video embeddings (after embed_image projection, at text hidden dim).
+    _vfe = locals().get("_video_frame_embeds")
+    if raw_video is not None and _vfe:
+        # embed_image may be called once per batch of frames or once per frame.
+        # Concatenate along the batch/frame axis then reshape to (1, N*T, H).
+        stacked = np.concatenate(_vfe, axis=0)  # (N_frames, T, H)
+        N, T, Hd = stacked.shape
+        hf_video_embeddings = stacked.reshape(1, N * T, Hd)  # (1, N*T, H)
+    else:
+        hf_video_embeddings = None
 
     hf_pixel_values = (
         hf_inputs["pixel_values"].detach().cpu().float().numpy()
@@ -292,6 +323,8 @@ def _precompute_hf_outputs(
         "pixel_values": hf_pixel_values,
         "image_position_ids": hf_image_position_ids,
         "hf_audio_features": hf_audio_features,
+        "hf_audio_embeddings": hf_audio_embeddings,
+        "hf_video_embeddings": hf_video_embeddings,
         "generated_text": hf_generated_text,
         "param_count": _count_hf_params(hf_model),
     }
@@ -392,6 +425,68 @@ def _build_preprocessor_free_inputs(backbone, hf_data, image_placeholder_id, aud
     return keras_hub_inputs
 
 
+import contextlib
+
+
+def _test_encoder_diagnostics(label, kh_encoder, kh_inputs, hf_embeddings, call_fn):
+    """Compare KH encoder output vs HF post-projection embeddings.
+
+    `call_fn(kh_encoder, kh_inputs)` should return the KH encoder output as a
+    numpy float32 array.  `hf_embeddings` is the output of HF's embed_xxx
+    module at text hidden size.  Both should have shape (B, T, H).
+
+    Returns True if they match within 1e-3; False otherwise.
+    """
+    if hf_embeddings is None:
+        print(f"  [Encoder {label}] HF embeddings not captured — skipping diagnostic.")
+        return None
+
+    kh_embs = call_fn(kh_encoder, kh_inputs).astype(np.float32)
+    hf_embs = hf_embeddings.astype(np.float32)
+
+    min_t = min(kh_embs.shape[-2], hf_embs.shape[-2])
+    diff = np.abs(kh_embs[..., :min_t, :] - hf_embs[..., :min_t, :])
+    max_diff = float(np.max(diff))
+    mean_diff = float(np.mean(diff))
+    tol = 1e-3 + 1e-3 * np.abs(hf_embs[..., :min_t, :])
+    pct = 100.0 * (1.0 - float(np.sum(diff > tol)) / diff.size)
+
+    if max_diff <= 1e-3:
+        print(f"  ✅ [Encoder {label}] Matches HF (max={max_diff:.6f}, mean={mean_diff:.6f}).")
+        return True
+    else:
+        print(
+            f"  ⚠️  [Encoder {label}] Diverges from HF — max={max_diff:.6f}, "
+            f"mean={mean_diff:.6f}, matching={pct:.2f}%.\n"
+            f"       Logit variance is driven by encoder arithmetic differences, not the decoder."
+        )
+        return False
+
+
+@contextlib.contextmanager
+def _mock_encoder_call(encoder, hf_embeddings):
+    """Temporarily replace encoder.call so it returns pre-computed HF embeddings.
+
+    The KH backbone pre-scales encoder outputs by hidden_dim^-0.5 and then
+    applies a global sqrt(hidden_dim) scale — so audio/vision positions see
+    the raw encoder output unchanged.  Injecting hf_embeddings directly
+    therefore places exactly HF's values at those sequence positions.
+
+    Works for both Gemma4AudioEncoder (regular Layer) and Gemma4VisionEncoder
+    (functional Keras model).
+    """
+    hf_t = ops.convert_to_tensor(hf_embeddings.astype(np.float32))
+    original_call = encoder.call
+
+    def mock_call(*args, **kwargs):
+        return ops.cast(hf_t, encoder.compute_dtype)
+
+    encoder.call = mock_call
+    try:
+        yield
+    finally:
+        encoder.call = original_call
+
 
 def _test_token_ids(label, preprocessor, prompt, hf_token_ids, **media_kwargs):
     """Assert KH-preprocessed token IDs match HF token IDs for any modality."""
@@ -478,8 +573,19 @@ def _test_generate(label, kh_model, prompt, hf_generated_text, **media_kwargs):
         max_length=2048 + 64,
     )
     kh_text = kh_output[0] if isinstance(kh_output, list) else kh_output
-    if isinstance(kh_text, str) and kh_text.startswith(prompt):
-        kh_text = kh_text[len(prompt):]
+    if isinstance(kh_text, str):
+        # Strip the prompt prefix. For modalities like audio/video the
+        # preprocessor expands placeholder tokens, so the output no longer
+        # starts with the literal prompt string. Instead, find the last
+        # model-turn marker and strip everything up to and including it.
+        if kh_text.startswith(prompt):
+            kh_text = kh_text[len(prompt):]
+        else:
+            for marker in ("<start_of_turn>model\n", "<|turn>model\n"):
+                idx = kh_text.rfind(marker)
+                if idx != -1:
+                    kh_text = kh_text[idx + len(marker):]
+                    break
 
     print(f"\n[{label}]🔶 HF generate output:\n  {hf_generated_text}")
     print(f"[{label}]🔶 KH generate output:\n  {kh_text}")
@@ -691,7 +797,24 @@ def _verify_model(
             {"prompts": [PROMPT_AUDIO], "audio": [raw_audio], "responses": [""]},
             sequence_length=hf_data_audio["logits"].shape[1] + 1,
         )
+        # Encoder diagnostic: compare KH audio_encoder output vs HF embed_audio output.
+        def _call_audio_encoder(enc, kh_inp):
+            x = kh_inp[0] if isinstance(kh_inp, tuple) else kh_inp
+            mel = x["audio_mel"]
+            mask = ops.cast(x["audio_mel_mask"], "bool")
+            return ops.convert_to_numpy(enc(mel, mask))
+        _test_encoder_diagnostics(
+            "audio", backbone.audio_encoder, kh_inputs_audio,
+            hf_data_audio.get("hf_audio_embeddings"), _call_audio_encoder,
+        )
+        # Numeric test with KH preprocessor (shows full pipeline divergence).
         _test_numerics("audio (KH preproc)", backbone, kh_inputs_audio, hf_data_audio["logits"])
+        # Numeric test with HF encoder outputs injected — isolates decoder accuracy.
+        if hf_data_audio.get("hf_audio_embeddings") is not None:
+            with _mock_encoder_call(backbone.audio_encoder, hf_data_audio["hf_audio_embeddings"]):
+                _test_numerics(
+                    "audio (HF encoder injected)", backbone, kh_inputs_audio, hf_data_audio["logits"]
+                )
 
     # Video: KH video pipeline is consistent with KH image pipeline.
     if is_video_model and hf_data_video is not None:
@@ -705,7 +828,14 @@ def _verify_model(
             {"prompts": [PROMPT_VIDEO], "videos": [raw_video_sub], "responses": [""]},
             sequence_length=hf_video_seq_len + 1,
         )
+        # Numeric test with KH preprocessor (shows full pipeline divergence).
         _test_numerics("video (KH preproc)", backbone, kh_inputs_video, hf_data_video["logits"])
+        # Numeric test with HF vision encoder outputs injected — isolates decoder accuracy.
+        if hf_data_video.get("hf_video_embeddings") is not None:
+            with _mock_encoder_call(backbone.vision_encoder, hf_data_video["hf_video_embeddings"]):
+                _test_numerics(
+                    "video (HF encoder injected)", backbone, kh_inputs_video, hf_data_video["logits"]
+                )
         preprocessor.num_frames_per_video = saved_num_frames_per_video
         preprocessor.packer.sequence_length = saved_packer_seq_len
 
