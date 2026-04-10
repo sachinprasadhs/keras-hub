@@ -641,27 +641,11 @@ def _convert_decoder_block(decoder_layer, layer_idx, loader, hf_key_fn):
         keras_variable=decoder_layer.attention.query_norm.scale,
         hf_weight_key=layer_key("self_attn.q_norm.weight"),
     )
-    loader.port_weight(
-        keras_variable=decoder_layer.attention.key_dense.kernel,
-        hf_weight_key=kv_layer_key("self_attn.k_proj.weight"),
-        hook_fn=lambda hf_tensor, keras_shape: np.transpose(
-            np.reshape(
-                hf_tensor,
-                (keras_shape[0], keras_shape[2], keras_shape[1]),
-            ),
-            axes=(0, 2, 1),
-        ),
-    )
-    loader.port_weight(
-        keras_variable=decoder_layer.attention.key_norm.scale,
-        hf_weight_key=kv_layer_key("self_attn.k_norm.weight"),
-    )
-    # v_proj is absent on global-attention layers when attention_k_eq_v=True
-    # (26B-A4B, 31B): value reuses the key projection, so value_dense=None.
-    if decoder_layer.attention.value_dense is not None:
+    # KV-shared layers have no k/v weights of their own (HF PR #45336).
+    if not decoder_layer.attention.is_kv_shared_layer:
         loader.port_weight(
-            keras_variable=decoder_layer.attention.value_dense.kernel,
-            hf_weight_key=kv_layer_key("self_attn.v_proj.weight"),
+            keras_variable=decoder_layer.attention.key_dense.kernel,
+            hf_weight_key=kv_layer_key("self_attn.k_proj.weight"),
             hook_fn=lambda hf_tensor, keras_shape: np.transpose(
                 np.reshape(
                     hf_tensor,
@@ -670,6 +654,24 @@ def _convert_decoder_block(decoder_layer, layer_idx, loader, hf_key_fn):
                 axes=(0, 2, 1),
             ),
         )
+        loader.port_weight(
+            keras_variable=decoder_layer.attention.key_norm.scale,
+            hf_weight_key=kv_layer_key("self_attn.k_norm.weight"),
+        )
+        # v_proj is absent on global-attention layers when attention_k_eq_v=True
+        # (26B-A4B, 31B): value reuses the key projection, so value_dense=None.
+        if decoder_layer.attention.value_dense is not None:
+            loader.port_weight(
+                keras_variable=decoder_layer.attention.value_dense.kernel,
+                hf_weight_key=kv_layer_key("self_attn.v_proj.weight"),
+                hook_fn=lambda hf_tensor, keras_shape: np.transpose(
+                    np.reshape(
+                        hf_tensor,
+                        (keras_shape[0], keras_shape[2], keras_shape[1]),
+                    ),
+                    axes=(0, 2, 1),
+                ),
+            )
     # v_norm (Gemma4VNorm) is parameter-free — no weight to port.
     loader.port_weight(
         keras_variable=decoder_layer.attention.output_dense.kernel,

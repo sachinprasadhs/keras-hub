@@ -451,7 +451,7 @@ def _test_numerics(label, backbone, keras_hub_inputs, hf_logits):
 
     try:
         np.testing.assert_allclose(kh_logits, hf_logits, atol=1e-3, rtol=1e-3)
-        print(f"✓ [{label}] Logits within 1e-3 tolerance (max={max_diff:.6f}, mean={mean_diff:.6f}).")
+        print(f"✅ [{label}] Logits within 1e-3 tolerance (max={max_diff:.6f}, mean={mean_diff:.6f}).")
     except AssertionError:
         diff = np.abs(kh_logits - hf_logits)
         tol = 1e-3 + 1e-3 * np.abs(hf_logits)
@@ -481,8 +481,8 @@ def _test_generate(label, kh_model, prompt, hf_generated_text, **media_kwargs):
     if isinstance(kh_text, str) and kh_text.startswith(prompt):
         kh_text = kh_text[len(prompt):]
 
-    print(f"\n[{label}] HF generate output:\n  {hf_generated_text}")
-    print(f"[{label}] KH generate output:\n  {kh_text}")
+    print(f"\n[{label}]🔶 HF generate output:\n  {hf_generated_text}")
+    print(f"[{label}]🔶 KH generate output:\n  {kh_text}")
 
 
 def _load_test_assets():
@@ -710,7 +710,6 @@ def _verify_model(
         preprocessor.packer.sequence_length = saved_packer_seq_len
 
     # ── 4. Generation comparison (all modalities) ─────────────────────────────
-    print("\n--- Generation Comparison ---")
     gemma4_lm = keras_hub.models.Gemma4CausalLM(
         backbone=backbone,
         preprocessor=preprocessor,
@@ -718,6 +717,7 @@ def _verify_model(
         final_logit_cap=final_logit_cap,
     )
 
+    print("\n--- Generation Comparison ---")
     _test_generate("text", gemma4_lm, PROMPT_TEXT, hf_data_text["generated_text"])
 
     preprocessor.num_vision_tokens_per_image = actual_num_tokens

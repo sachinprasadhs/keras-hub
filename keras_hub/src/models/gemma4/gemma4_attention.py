@@ -102,29 +102,56 @@ class Gemma4TextAttention(keras.layers.Layer):
         )
         self.query_dense.build(inputs_shape)
 
-        self.key_dense = keras.layers.EinsumDense(
-            "bsd,kdh->bskh",
-            output_shape=(None, self.effective_num_kv_heads, self.head_dim),
-            kernel_initializer=self._kernel_initializer,
-            dtype=self.dtype_policy,
-            name="key",
-        )
-        self.key_dense.build(inputs_shape)
-
-        # When attention_k_eq_v, V reuses K's projection — no separate weight.
-        if not self.attention_k_eq_v:
-            self.value_dense = keras.layers.EinsumDense(
+        # KV-shared layers borrow K/V from the source layer at runtime and do
+        # not own their own projections.
+        if not self.is_kv_shared_layer:
+            self.key_dense = keras.layers.EinsumDense(
                 "bsd,kdh->bskh",
                 output_shape=(None, self.effective_num_kv_heads, self.head_dim),
                 kernel_initializer=self._kernel_initializer,
                 dtype=self.dtype_policy,
-                name="value",
+                name="key",
             )
-            self.value_dense.build(inputs_shape)
-        else:
-            self.value_dense = None
+            self.key_dense.build(inputs_shape)
 
-        # Always apply Q/K norms in Gemma4.
+            # When attention_k_eq_v, V reuses K's projection — no separate weight.
+            if not self.attention_k_eq_v:
+                self.value_dense = keras.layers.EinsumDense(
+                    "bsd,kdh->bskh",
+                    output_shape=(None, self.effective_num_kv_heads, self.head_dim),
+                    kernel_initializer=self._kernel_initializer,
+                    dtype=self.dtype_policy,
+                    name="value",
+                )
+                self.value_dense.build(inputs_shape)
+            else:
+                self.value_dense = None
+
+            key_shape = self.key_dense.compute_output_shape(inputs_shape)
+            self.key_norm = RMSNormalization(
+                epsilon=self.layer_norm_epsilon,
+                dtype=self.dtype_policy,
+                name="key_norm",
+            )
+            self.key_norm.build(key_shape)
+
+            # V norm: pure L2 normalization (no learnable scale).
+            # When attention_k_eq_v, value comes from key_dense so same shape.
+            kv_norm_shape = (None, None, self.effective_num_kv_heads, self.head_dim)
+            self.value_norm = Gemma4VNorm(
+                epsilon=self.layer_norm_epsilon,
+                dtype=self.dtype_policy,
+                name="value_norm",
+            )
+            self.value_norm.build(kv_norm_shape)
+        else:
+            # KV-shared layer: K/V are borrowed from the source layer's output.
+            self.key_dense = None
+            self.value_dense = None
+            self.key_norm = None
+            self.value_norm = None
+
+        # Always apply Q norm in Gemma4.
         query_shape = self.query_dense.compute_output_shape(inputs_shape)
         self.query_norm = RMSNormalization(
             epsilon=self.layer_norm_epsilon,
@@ -132,24 +159,6 @@ class Gemma4TextAttention(keras.layers.Layer):
             name="query_norm",
         )
         self.query_norm.build(query_shape)
-
-        key_shape = self.key_dense.compute_output_shape(inputs_shape)
-        self.key_norm = RMSNormalization(
-            epsilon=self.layer_norm_epsilon,
-            dtype=self.dtype_policy,
-            name="key_norm",
-        )
-        self.key_norm.build(key_shape)
-
-        # V norm: pure L2 normalization (no learnable scale).
-        # When attention_k_eq_v, value comes from key_dense so same shape.
-        kv_norm_shape = (None, None, self.effective_num_kv_heads, self.head_dim)
-        self.value_norm = Gemma4VNorm(
-            epsilon=self.layer_norm_epsilon,
-            dtype=self.dtype_policy,
-            name="value_norm",
-        )
-        self.value_norm.build(kv_norm_shape)
 
         self.dropout_layer = keras.layers.Dropout(
             rate=self.dropout,
@@ -385,6 +394,11 @@ class Gemma4TextAttention(keras.layers.Layer):
                 value = shared_kv[:, 1, ...]
                 new_cache = cache
             else:
+                if self.is_kv_shared_layer:
+                    raise ValueError(
+                        f"KV-shared layer {self.name!r} was called without "
+                        "shared_kv. Check backbone KV-sharing configuration."
+                    )
                 key_update = self.key_dense(x)
                 key_update = self.key_norm(key_update)
                 key_update = self._apply_rope(
@@ -429,6 +443,11 @@ class Gemma4TextAttention(keras.layers.Layer):
                 key = shared_kv[:, 0, ...]
                 value = shared_kv[:, 1, ...]
             else:
+                if self.is_kv_shared_layer:
+                    raise ValueError(
+                        f"KV-shared layer {self.name!r} was called without "
+                        "shared_kv. Check backbone KV-sharing configuration."
+                    )
                 if self.attention_k_eq_v:
                     # K=V: value projection reuses key_dense weights.
                     raw_kv = self.key_dense(x)
