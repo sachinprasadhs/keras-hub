@@ -81,7 +81,7 @@ def load_image_converter_config(preset, transformers_config):
 
 def load_audio_converter_config(preset, transformers_config):
     """Return Gemma4AudioConverter kwargs, or None for text/vision models."""
-    if "audio_config" not in transformers_config:
+    if not transformers_config.get("audio_config"):
         return None
 
     processor_config = load_json(preset, "processor_config.json")
