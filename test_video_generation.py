@@ -26,10 +26,14 @@ class Logger(object):
 
 sys.stdout = Logger()
 
+import av
+import requests
 import keras_hub
 import numpy as np
-from keras.utils import load_img, img_to_array
+from io import BytesIO
 
+VIDEO_URL = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4"
+NUM_FRAMES = 8
 
 # Load the model
 preset = "./gemma4_instruct_2b"
@@ -38,60 +42,55 @@ model = keras_hub.models.Gemma4CausalLM.from_preset(preset)
 print("Model loaded.")
 model.preprocessor.build(None)
 # Override packer sequence length to avoid truncation of video tokens
-model.preprocessor.packer.sequence_length = 128
-print("Overrode packer sequence length to 128.")
-model.preprocessor.video_converter.num_frames = 1
-print("Overrode video_converter num_frames to 1.")
+model.preprocessor.packer.sequence_length = 4096
+print("Overrode packer sequence length to 4096.")
+model.preprocessor.video_converter.num_frames = NUM_FRAMES
+model.preprocessor.num_frames_per_video = NUM_FRAMES
+print(f"Overrode video_converter num_frames to {NUM_FRAMES}.")
 
 
-# Load video frames
-frames_dir = "bbb_frames_32"
-frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith(".jpg")])[:1]
-print(f"Loading {len(frame_files)} frames from {frames_dir}...")
-
-frames = []
-for f in frame_files:
-    img = load_img(os.path.join(frames_dir, f), target_size=(224, 224))
-    arr = img_to_array(img)
-    frames.append(arr)
-
-# Stack into (T, H, W, C)
-video_tensor = np.stack(frames, axis=0)
+# Download and decode video from URL
+print(f"Downloading video from {VIDEO_URL} ...")
+response = requests.get(VIDEO_URL, timeout=60)
+response.raise_for_status()
+container = av.open(BytesIO(response.content))
+all_frames = [
+    f.to_ndarray(format="rgb24")
+    for f in container.decode(video=0)
+]
+indices = np.linspace(0, len(all_frames) - 1, NUM_FRAMES, dtype=int)
+video_tensor = np.stack([all_frames[i] for i in indices])  # (F, H, W, C) uint8
 print(f"Video tensor shape: {video_tensor.shape}")
 
 # Prepare prompt
-# Gemma 4 uses <|video|> placeholder
-prompt = "<|turn>user\nDescribe this video. <|video><|video|>\n<turn|>\n<|turn>model\n"
+prompt = (
+    "<start_of_turn>user\n"
+    "<|video|>\n"
+    "Describe this video."
+    "<end_of_turn>\n<start_of_turn>model\n"
+)
 
-# Set video_fps to 24.0 to match HF default behavior
-model.preprocessor.video_fps = 24.0
-print("Set video_fps to 24.0")
-
-# Preprocess manually to see the prompt
-preprocessed = model.preprocessor.generate_preprocess({"prompts": prompt, "videos": video_tensor})
+# Preprocess manually to inspect the token sequence
+preprocessed = model.preprocessor.generate_preprocess(
+    {"prompts": prompt, "videos": video_tensor}
+)
 print("Preprocessed keys:", preprocessed.keys())
 
-
-
 # Detokenize to see the prompt
-print("Detokenizing prompt...")
 decoded_prompt = model.preprocessor.tokenizer.detokenize(preprocessed["token_ids"])
-print("Detokenized prompt.")
-print("Decoded Prompt Preview (first 500 chars):")
-print(str(decoded_prompt[0])[:500])
-print("Decoded Prompt Preview (last 500 chars):")
-print(str(decoded_prompt[0])[-500:])
+print("Decoded Prompt (first 300 chars):", str(decoded_prompt[0])[:300])
+print("Decoded Prompt (last  200 chars):", str(decoded_prompt[0])[-200:])
 
-print("Starting generation...")
 import time
+print("\nStarting generation...")
 start_time = time.time()
 
 output = model.generate(
     {"prompts": prompt, "videos": video_tensor},
-    max_length=100,
+    max_length=256,
 )
 
-
-print(f"Output type: {type(output)}")
+elapsed = time.time() - start_time
+print(f"\nGeneration time: {elapsed:.1f}s")
 print(f"Decoded Output:\n{output}")
 
