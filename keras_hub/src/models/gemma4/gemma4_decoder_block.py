@@ -27,6 +27,65 @@ class Gemma4TextDecoderBlock(keras.layers.Layer):
     4. All text decoder layers have a non-trainable `layer_scalar` (init 1.0)
        that the output is multiplied by (vision encoder blocks do not).
     5. Default sliding_window_size is 512 (vs 1024 in Gemma3).
+
+    Args:
+        hidden_dim: int. Dimensionality of the model's hidden representations.
+        intermediate_dim: int. Dimensionality of the feed-forward intermediate
+            layer.
+        head_dim: int. Dimensionality of each attention head.
+        num_query_heads: int. Number of query attention heads.
+        num_key_value_heads: int. Number of key/value attention heads (for
+            grouped-query attention).
+        logit_soft_cap: float. Optional soft cap applied to attention logits
+            before softmax. Defaults to `None`.
+        use_sliding_window_attention: bool. Whether to use sliding-window
+            (local) attention. Defaults to `False`.
+        sliding_window_size: int. Size of the sliding attention window when
+            `use_sliding_window_attention=True`. Defaults to `512`.
+        layer_norm_epsilon: float. Epsilon value for RMS normalization layers.
+            Defaults to `1e-6`.
+        rope_wavelength: float. Base wavelength for rotary position embeddings.
+            Defaults to `10000.0`.
+        rope_scaling_factor: float. Scaling factor applied to RoPE frequencies.
+            Defaults to `1.0`.
+        rope_partial_rotary_factor: float. Fraction of head dimensions that
+            receive rotary embeddings. Defaults to `1.0`.
+        use_bidirectional_attention: bool. Whether to enable bidirectional
+            (non-causal) attention. Defaults to `False`.
+        use_vision_bidirectional_attention: bool. Whether to apply
+            bidirectional attention to vision token positions only. Defaults
+            to `False`.
+        is_global_attention: bool. Whether this layer uses global (full-
+            sequence) attention rather than sliding-window attention. Defaults
+            to `False`.
+        global_head_dim: int. Head dimensionality to use for global attention
+            layers (may differ from `head_dim`). Defaults to `None`.
+        dropout: float. Dropout rate applied after attention and FFW
+            sub-layers. Defaults to `0`.
+        is_kv_shared_layer: bool. Whether this layer shares key/value
+            projections with another layer. Defaults to `False`.
+        kv_shared_layer_index: int. Index of the layer whose key/value
+            projections are reused when `is_kv_shared_layer=True`. Defaults
+            to `None`.
+        hidden_size_per_layer_input: int. Extra hidden units added per-layer
+            for recurrent-style inputs. Defaults to `0`.
+        attention_k_eq_v: bool. Whether key and value projections share
+            weights. Defaults to `False`.
+        num_global_key_value_heads: int. Number of key/value heads used in
+            global attention layers. Defaults to `None`.
+        use_double_wide_mlp: bool. Whether to double the intermediate
+            dimension in MLP layers for KV-shared layers. Defaults to `False`.
+        enable_moe_block: bool. Whether to replace the dense FFW block with a
+            Mixture-of-Experts block. Defaults to `False`.
+        num_experts: int. Total number of experts when
+            `enable_moe_block=True`. Defaults to `None`.
+        expert_intermediate_dim: int. Intermediate dimension of each expert
+            MLP when `enable_moe_block=True`. Defaults to `None`.
+        num_experts_per_token: int. Number of experts activated per token
+            when `enable_moe_block=True`. Defaults to `8`.
+        is_text_layer: bool. Whether this block is a text (as opposed to
+            vision) decoder layer; controls whether a non-trainable
+            `layer_scalar` is applied to the output. Defaults to `True`.
     """
 
     def __init__(
@@ -588,6 +647,23 @@ class Gemma4VisionDecoderBlock(keras.layers.Layer):
 
     This operates strictly on images and disables MoE arrays, explicit layer
     scalars, and global sliding windows.
+
+    Args:
+        hidden_dim: int. Dimensionality of the model's hidden representations.
+        intermediate_dim: int. Dimensionality of the feed-forward intermediate
+            layer.
+        head_dim: int. Dimensionality of each attention head.
+        num_query_heads: int. Number of query attention heads.
+        num_key_value_heads: int. Number of key/value attention heads (for
+            grouped-query attention).
+        layer_norm_epsilon: float. Epsilon value for RMS normalization layers.
+            Defaults to `1e-6`.
+        rope_wavelength: float. Base wavelength for rotary position embeddings.
+            Defaults to `10000.0`.
+        dropout: float. Dropout rate applied after attention and FFW
+            sub-layers. Defaults to `0`.
+        use_clipped_linears: bool. Whether to use clipped (numerically stable)
+            linear projections in attention. Defaults to `True`.
     """
 
     def __init__(

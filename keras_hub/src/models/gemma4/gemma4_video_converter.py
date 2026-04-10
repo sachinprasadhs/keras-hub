@@ -13,10 +13,14 @@ class Gemma4VideoConverter(VideoConverter):
     `Gemma4ImageConverter` for frame-level processing.
 
     Args:
-        patch_size: Size of each square patch in pixels.
-        max_soft_tokens: Maximum number of soft tokens per video frame.
-        pooling_kernel_size: Spatial pooling kernel size.
-        num_frames: Number of frames to sample from the video.
+        patch_size: int. Size of each square patch in pixels. Defaults to
+            `16`.
+        max_soft_tokens: int. Maximum number of pooled soft tokens per video
+            frame. Defaults to `70`.
+        pooling_kernel_size: int. Spatial pooling kernel size applied after
+            the vision encoder. Defaults to `3`.
+        num_frames: int. Number of frames to uniformly sample from the video.
+            Defaults to `32`.
     """
 
     def __init__(

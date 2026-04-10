@@ -47,9 +47,12 @@ class Gemma4Backbone(Backbone):
 
     Args:
         vocabulary_size: int. The size of the token vocabulary.
-        image_size: int. The spatial resolution of images fed to the vision
-            encoder (height = width). Must be divisible by
-            `patch_size * pool_size` when a `vision_encoder` is provided.
+        image_size: int. The spatial resolution of images (height = width).
+            Stored as a config value for serialization purposes only; it does
+            not affect the backbone's forward pass. Image patching and resizing
+            are handled by `keras_hub.layers.Gemma4ImageConverter` before data
+            reaches the backbone. The `vision_encoder` has its own `image_size`
+            parameter that controls position embedding sizes.
         num_layers: int. Number of transformer decoder layers.
         num_query_heads: int. Number of query heads per attention layer.
         num_key_value_heads: int. Number of key/value heads (GQA).
@@ -141,29 +144,37 @@ class Gemma4Backbone(Backbone):
         dtype: string or `keras.mixed_precision.DTypePolicy`. Compute dtype.
             Defaults to `None`.
 
-    Example:
-    ```python
-    import numpy as np
+    Examples:
 
-    # Text-only input.
+    ```python
+    # Load a pretrained Gemma4 backbone (multimodal: text, image, audio, video).
+    model = keras_hub.models.Gemma4Backbone.from_preset("gemma4_instruct_2b")
+
+    # Randomly initialized Gemma4 backbone with a custom config.
+    vision_encoder = keras_hub.models.Gemma4VisionEncoder(
+        image_size=896,
+        patch_size=14,
+        pool_size=2,
+        num_layers=27,
+        num_heads=16,
+        head_dim=64,
+        num_key_value_heads=16,
+        hidden_dim=1024,
+        intermediate_dim=4096,
+        output_dim=2048,
+    )
     model = keras_hub.models.Gemma4Backbone(
-        vocabulary_size=262144,
-        image_size=768,
+        vocabulary_size=262208,
+        image_size=896,
         num_layers=26,
         num_query_heads=8,
         num_key_value_heads=4,
-        hidden_dim=2304,
-        intermediate_dim=9216,
+        hidden_dim=2048,
+        intermediate_dim=16384,
         head_dim=256,
-        sliding_window_size=512,
-        vision_encoder=None,
-        dtype="bfloat16",
+        vision_encoder=vision_encoder,
+        dtype="float32",
     )
-    inputs = {
-        "token_ids": np.ones((1, 128), dtype="int32"),
-        "padding_mask": np.ones((1, 128), dtype="int32"),
-    }
-    model(inputs)
     ```
     """
 

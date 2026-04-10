@@ -31,7 +31,7 @@ class Gemma4AudioConverter(AudioConverter):
             Defaults to ``16000``.
         max_audio_length: int. Maximum audio clip length in seconds. Inputs
             longer than this are trimmed; shorter inputs are zero-padded.
-            Defaults to ``300``.
+            Defaults to ``30``.
         min_frequency: float. Lower frequency bound for the mel filterbank in
             Hz. Defaults to ``0.0``.
         max_frequency: float. Upper frequency bound for the mel filterbank in
