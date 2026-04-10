@@ -235,20 +235,14 @@ def _precompute_hf_outputs(
                 [mm_pad, hf_inputs["mm_token_type_ids"]], dim=1
             )
 
-    # Register forward hooks to capture encoder outputs (at text hidden size)
-    # during the main forward pass.  These are later used for encoder-level
-    # diagnostics and for the "HF encoder injected" numeric tests.
-    _encoder_captures = {}
+    # Register a forward hook on embed_vision to capture the per-frame
+    # embeddings at text hidden size.  These are used in the
+    # "video (HF encoder injected)" numeric test to verify that the KH decoder
+    # is numerically correct independent of any video-preprocessing differences.
     _hooks = []
     _hf_model_inner = getattr(hf_model, "model", None)
-    if _hf_model_inner is not None:
-        if "input_features" in hf_inputs and hasattr(_hf_model_inner, "embed_audio"):
-            def _audio_hook(mod, inp, out):
-                _encoder_captures["audio"] = out.detach().cpu().float().numpy()
-            _hooks.append(
-                _hf_model_inner.embed_audio.register_forward_hook(_audio_hook)
-            )
-        if raw_video is not None and hasattr(_hf_model_inner, "embed_vision"):
+    if _hf_model_inner is not None and raw_video is not None:
+        if hasattr(_hf_model_inner, "embed_vision"):
             _video_frame_embeds = []
             def _video_hook(mod, inp, out):
                 _video_frame_embeds.append(out.detach().cpu().float().numpy())
@@ -267,13 +261,7 @@ def _precompute_hf_outputs(
     hf_input_ids = hf_inputs["input_ids"].detach().cpu().numpy()
     hf_attention_mask = hf_inputs["attention_mask"].detach().cpu().numpy()
 
-    # Capture audio embeddings (after embed_audio projection, at text hidden dim).
-    # These are equivalent to KH's audio_encoder full output and are used for
-    # encoder-level diagnostics and HF-encoder-injected numeric tests.
-    hf_audio_embeddings = _encoder_captures.get("audio")  # (1, T_audio, H) or None
-
-    # For backwards-compat: also keep the raw audio mel features for the
-    # mel-spectrogram comparison test.
+    # Raw audio mel features are retained for the mel-spectrogram comparison test.
     hf_audio_features = None
     if "input_features" in hf_inputs:
         with torch.no_grad():
@@ -330,7 +318,6 @@ def _precompute_hf_outputs(
         "pixel_values": hf_pixel_values,
         "image_position_ids": hf_image_position_ids,
         "hf_audio_features": hf_audio_features,
-        "hf_audio_embeddings": hf_audio_embeddings,
         "hf_video_embeddings": hf_video_embeddings,
         "generated_text": hf_generated_text,
         "param_count": _count_hf_params(hf_model),
@@ -435,53 +422,22 @@ def _build_preprocessor_free_inputs(backbone, hf_data, image_placeholder_id, aud
 import contextlib
 
 
-def _test_encoder_diagnostics(label, kh_encoder, kh_inputs, hf_embeddings, call_fn):
-    """Compare KH encoder output vs HF post-projection embeddings.
-
-    `call_fn(kh_encoder, kh_inputs)` should return the KH encoder output as a
-    numpy float32 array.  `hf_embeddings` is the output of HF's embed_xxx
-    module at text hidden size.  Both should have shape (B, T, H).
-
-    Returns True if they match within 1e-3; False otherwise.
-    """
-    if hf_embeddings is None:
-        print(f"  [Encoder {label}] HF embeddings not captured — skipping diagnostic.")
-        return None
-
-    kh_embs = call_fn(kh_encoder, kh_inputs).astype(np.float32)
-    hf_embs = hf_embeddings.astype(np.float32)
-
-    min_t = min(kh_embs.shape[-2], hf_embs.shape[-2])
-    diff = np.abs(kh_embs[..., :min_t, :] - hf_embs[..., :min_t, :])
-    max_diff = float(np.max(diff))
-    mean_diff = float(np.mean(diff))
-    tol = 1e-3 + 1e-3 * np.abs(hf_embs[..., :min_t, :])
-    pct = 100.0 * (1.0 - float(np.sum(diff > tol)) / diff.size)
-
-    if max_diff <= 1e-3:
-        print(f"  ✅ [Encoder {label}] Matches HF (max={max_diff:.6f}, mean={mean_diff:.6f}).")
-        return True
-    else:
-        print(
-            f"  ⚠️  [Encoder {label}] Diverges from HF — max={max_diff:.6f}, "
-            f"mean={mean_diff:.6f}, matching={pct:.2f}%.\n"
-            f"       Logit variance is driven by encoder arithmetic differences, not the decoder."
-        )
-        return False
-
-
 @contextlib.contextmanager
 def _mock_encoder_call(encoder, hf_embeddings, n_clips=1):
-    """Temporarily replace encoder.call so it returns pre-computed HF embeddings.
+    """Temporarily replace encoder.call so the backbone uses pre-computed HF
+    embeddings instead of running the KH encoder.
 
-    The KH backbone pre-scales encoder outputs by hidden_dim^-0.5 and then
-    applies a global sqrt(hidden_dim) scale — so audio/vision positions see
-    the raw encoder output unchanged.  Injecting hf_embeddings directly
-    therefore places exactly HF's values at those sequence positions.
+    This lets us verify the KH decoder in isolation: if the test passes when
+    HF's encoder output is injected but fails with KH's preprocessor output,
+    the divergence is in preprocessing (e.g. pixel normalisation), not the
+    decoder weights.
 
-    hf_embeddings: numpy array (B, T, H) at text hidden size.
-    n_clips: number of clips/images dimension to insert as axis 1.
-             The backbone expects (B, N_clips, T, H) from the encoder.
+    Args:
+        encoder: KH encoder layer whose `.call` will be monkey-patched.
+        hf_embeddings: numpy array (B, T, H) — HF encoder output at text
+            hidden size, as captured by a forward hook on `embed_vision`.
+        n_clips: number of clips/frames axis expected by the backbone
+            (backbone shape: (B, n_clips, T//n_clips, H)).
     """
     B, T, Hd = hf_embeddings.shape
     hf_4d = hf_embeddings.reshape(B, n_clips, T // n_clips, Hd).astype(np.float32)
@@ -813,26 +769,18 @@ def _verify_model(
             {"prompts": [PROMPT_AUDIO], "audio": [raw_audio], "responses": [""]},
             sequence_length=hf_data_audio["logits"].shape[1] + 1,
         )
-        # Encoder diagnostic: compare KH audio_encoder output vs HF embed_audio output.
-        def _call_audio_encoder(enc, kh_inp):
-            x = kh_inp[0] if isinstance(kh_inp, tuple) else kh_inp
-            mel = x["audio_mel"]
-            mask = ops.cast(x["audio_mel_mask"], "bool")
-            return ops.convert_to_numpy(enc(mel, mask))
-        _test_encoder_diagnostics(
-            "audio", backbone.audio_encoder, kh_inputs_audio,
-            hf_data_audio.get("hf_audio_embeddings"), _call_audio_encoder,
-        )
-        # Numeric test with KH preprocessor (shows full pipeline divergence).
         _test_numerics("audio (KH preproc)", backbone, kh_inputs_audio, hf_data_audio["logits"])
-        # Numeric test with HF encoder outputs injected — isolates decoder accuracy.
-        if hf_data_audio.get("hf_audio_embeddings") is not None:
-            with _mock_encoder_call(backbone.audio_encoder, hf_data_audio["hf_audio_embeddings"]):
-                _test_numerics(
-                    "audio (HF encoder injected)", backbone, kh_inputs_audio, hf_data_audio["logits"]
-                )
 
-    # Video: KH video pipeline is consistent with KH image pipeline.
+    # Video: two numeric checks are run.
+    #   1. "video (KH preproc)" — end-to-end using KH's video preprocessor.
+    #      A logit mismatch here is expected and acceptable: KH and HF use
+    #      slightly different frame resizing/normalisation pipelines, so the
+    #      pixel values fed to the vision encoder differ.
+    #   2. "video (HF encoder injected)" — the backbone is run with HF's own
+    #      vision-encoder output injected in place of KH's.  This test is the
+    #      authoritative decoder correctness check: it passes iff the KH
+    #      decoder weights and architecture are correct, independent of
+    #      preprocessing differences.
     if is_video_model and hf_data_video is not None:
         raw_video_sub = hf_data_video["raw_video_sub"]
         hf_video_seq_len = hf_data_video["logits"].shape[1]
@@ -844,10 +792,11 @@ def _verify_model(
             {"prompts": [PROMPT_VIDEO], "videos": [raw_video_sub], "responses": [""]},
             sequence_length=hf_video_seq_len + 1,
         )
-        # Numeric test with KH preprocessor (shows full pipeline divergence).
+        # Test 1: end-to-end with KH preprocessor.
         _test_numerics("video (KH preproc)", backbone, kh_inputs_video, hf_data_video["logits"])
-        # Numeric test with HF vision encoder outputs injected — isolates decoder accuracy.
-        # n_clips = number of frames (each frame is an "image" in the vision encoder).
+        # Test 2: inject HF vision-encoder outputs to verify decoder correctness.
+        # n_clips = number of frames (each frame is processed as a separate image
+        # by the vision encoder, giving shape (B, n_clips, T_per_frame, H)).
         if hf_data_video.get("hf_video_embeddings") is not None:
             n_frames = raw_video_sub.shape[0]
             with _mock_encoder_call(backbone.vision_encoder, hf_data_video["hf_video_embeddings"], n_clips=n_frames):

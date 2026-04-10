@@ -77,6 +77,32 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
     number of audio tokens required for the clip, computed dynamically from the
     mel-spectrogram length.
 
+    By default, per-frame timestamps are computed from sequential indices
+    `[0, 1, ..., N-1]` at `video_fps`. When your video was sampled at
+    irregular intervals (e.g. every 8th frame of a 30 fps source), set
+    `preprocessor.video_metadata` to a list of per-sample dicts before
+    calling the preprocessor. Each dict accepts a `"frames_indices"` key
+    (`list[int]`, the source frame indices that were sampled) and an optional
+    `"fps"` key (`float`, defaults to `preprocessor.video_fps`). When
+    `video_metadata` is `None` (the default) the preprocessor falls back to
+    sequential indices at `video_fps`, so existing code is unaffected.
+
+    Examples:
+
+    Using `video_metadata` to pass real frame indices and fps.
+    ```python
+    # One dict per sample in the batch.
+    preprocessor.video_metadata = [
+        {"frames_indices": [0, 8, 16, 24], "fps": 30.0},
+    ]
+    output = preprocessor({
+        "prompts": ["Describe this video: <|video|>"],
+        "responses": [""],
+        "videos": [my_video_frames],  # shape (N_frames, H, W, 3)
+    })
+    preprocessor.video_metadata = None  # reset to default after use
+    ```
+
     For use with generation, the layer also exposes two methods
     `generate_preprocess()` and `generate_postprocess()`. When this preprocessor
     is attached to a `keras_hub.models.Gemma4CausalLM` instance, these methods
@@ -657,6 +683,99 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             self.video_converter.pooling_kernel_size,
         )
 
+    def _build_video_replacement(self, n_tokens, frames_indices, fps):
+        """Build the video replacement string for a single video.
+
+        Uses source frame indices and fps to compute accurate per-frame
+        timestamps, matching HF Gemma4Processor behavior.
+
+        Args:
+            n_tokens: int. Vision tokens per frame.
+            frames_indices: list[int]. Source video frame indices.
+            fps: float. Source video frames-per-second.
+
+        Returns:
+            str. Replacement string for a single ``<|video|>`` placeholder.
+        """
+        frame_strs = []
+        for idx in frames_indices:
+            seconds = idx / fps
+            mm = int(seconds // 60)
+            ss = int(seconds % 60)
+            timestamp = f"{mm:02d}:{ss:02d}"
+            frame_strs.append(
+                f"{timestamp} <|image>{'<|video|>' * n_tokens}<image|>"
+            )
+        return " ".join(frame_strs)
+
+    def _expand_video_prompt(self, prompts, videos):
+        """Expand ``<|video|>`` placeholders with per-frame token sequences.
+
+        Reads ``self.video_metadata`` if it has been set before calling this
+        preprocessor.  Each element of the list should be a dict with keys:
+
+        Each dict accepts a `"frames_indices"` key (`list[int]`, the source
+        frame indices sampled from the original video, e.g. `[0, 8, 16, ...]`)
+        and an optional `"fps"` key (`float`, the source video fps).
+
+        When `video_metadata` is `None` (the default), falls back to sequential
+        indices `[0, 1, ..., N-1]` at `self.video_fps`, preserving existing
+        behaviour.
+
+        Examples:
+
+        Using `video_metadata` when prompt expansion tokens are needed.
+        ```python
+        preprocessor.video_metadata = [
+            {"frames_indices": [0, 8, 16], "fps": 30.0},
+        ]
+        prompts = preprocessor._expand_video_prompt(
+            tf.constant(["<|video|>"]), videos=None
+        )
+        preprocessor.video_metadata = None  # reset after use
+        ```
+
+        Args:
+            prompts: A `tf.Tensor` of strings (batch of prompts).
+            videos: Raw video input, or `None`.
+
+        Returns:
+            A `tf.Tensor` of strings with `<|video|>` placeholders replaced.
+        """
+        n_tokens = (
+            self._compute_video_n_tokens(videos)
+            if videos is not None
+            else self.num_vision_tokens_per_frame
+        )
+        vid_pattern = re.escape(self.video_placeholder)
+        video_metadata = getattr(self, "video_metadata", None)
+
+        if video_metadata is None:
+            # Default: sequential indices [0, 1, ..., N-1] at self.video_fps.
+            frames_indices = list(range(self.num_frames_per_video))
+            replacement = self._build_video_replacement(
+                n_tokens, frames_indices, self.video_fps
+            )
+            return tf.strings.regex_replace(prompts, vid_pattern, replacement)
+
+        # Per-sample metadata provided via the self.video_metadata attribute.
+        # Cannot be passed through the @preprocessing_function input dict
+        # because the decorator converts dict values to tensors, losing the
+        # Python list type.
+        if not isinstance(video_metadata, (list, tuple)):
+            video_metadata = [video_metadata]
+        vid_re = re.compile(vid_pattern)
+        prompts_list = [
+            p.decode("utf-8") if isinstance(p, bytes) else str(p)
+            for p in prompts.numpy()
+        ]
+        for b, meta in enumerate(video_metadata):
+            frames_indices = meta["frames_indices"]
+            fps = meta.get("fps", self.video_fps)
+            rep = self._build_video_replacement(n_tokens, frames_indices, fps)
+            prompts_list[b] = vid_re.sub(rep, prompts_list[b], count=1)
+        return tf.constant(prompts_list, dtype=tf.string)
+
     @preprocessing_function
     def call(
         self,
@@ -708,27 +827,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             )
 
         if self.video_converter is not None:
-            n_tokens = (
-                self._compute_video_n_tokens(videos)
-                if videos is not None
-                else self.num_vision_tokens_per_frame
-            )
-            vid_pattern = re.escape(self.video_placeholder)
-            frames = []
-            for i in range(self.num_frames_per_video):
-                seconds = i / self.video_fps
-                mm = int(seconds // 60)
-                ss = int(seconds % 60)
-                timestamp = f"{mm:02d}:{ss:02d}"
-                frames.append(
-                    f"{timestamp} <|image>{'<|video|>' * n_tokens}<image|>"
-                )
-            replacement = " ".join(frames)
-            prompts = tf.strings.regex_replace(
-                prompts,
-                vid_pattern,
-                replacement,
-            )
+            prompts = self._expand_video_prompt(prompts, videos)
 
         if self.audio_converter is not None:
             if audio is not None and audio_mel is None:
@@ -955,27 +1054,7 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
             )
 
         if self.video_converter is not None:
-            n_tokens = (
-                self._compute_video_n_tokens(videos)
-                if videos is not None
-                else self.num_vision_tokens_per_frame
-            )
-            vid_pattern = re.escape(self.video_placeholder)
-            frames = []
-            for i in range(self.num_frames_per_video):
-                seconds = i / self.video_fps
-                mm = int(seconds // 60)
-                ss = int(seconds % 60)
-                timestamp = f"{mm:02d}:{ss:02d}"
-                frames.append(
-                    f"{timestamp} <|image>{'<|video|>' * n_tokens}<image|>"
-                )
-            replacement = " ".join(frames)
-            prompts = tf.strings.regex_replace(
-                prompts,
-                vid_pattern,
-                replacement,
-            )
+            prompts = self._expand_video_prompt(prompts, videos)
 
         audio_mel = None
         audio_mel_mask = None

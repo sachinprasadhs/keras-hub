@@ -243,6 +243,53 @@ class Gemma4CausalLMPreprocessorTest(TestCase):
         # max_soft_tokens=2 produces 1 visible token per frame.
         self.assertEqual(int(keras.ops.sum(vision_mask)), 2)
 
+    def test_video_metadata_timestamps(self):
+        """video_metadata attribute produces correct per-frame timestamps."""
+        video_converter = Gemma4VideoConverter(
+            patch_size=4,
+            num_frames=2,
+            max_soft_tokens=2,
+        )
+        # Use fps=1.0 so that integer frame indices map directly to seconds,
+        # making the expected "MM:SS" values easy to reason about.
+        preprocessor = Gemma4CausalLMPreprocessor(
+            tokenizer=self.tokenizer,
+            video_converter=video_converter,
+            sequence_length=100,
+            num_frames_per_video=2,
+            num_vision_tokens_per_frame=1,
+            video_fps=1.0,
+        )
+
+        prompts = tf.constant(["<|video|>"])
+
+        # === Default (no metadata): sequential [0, 1] at fps=1.0 ===
+        # Frame 0 → 0.0 s → "00:00", frame 1 → 1.0 s → "00:01".
+        expanded_default = preprocessor._expand_video_prompt(prompts, None)
+        expanded_default_str = expanded_default.numpy()[0].decode("utf-8")
+        self.assertIn("00:00", expanded_default_str)
+        self.assertIn("00:01", expanded_default_str)
+
+        # === With video_metadata: frames_indices=[0, 60], fps=1.0 ===
+        # Frame 0 → 0.0 s → "00:00", frame 60 → 60.0 s → "01:00".
+        preprocessor.video_metadata = [
+            {"frames_indices": [0, 60], "fps": 1.0}
+        ]
+        expanded_meta = preprocessor._expand_video_prompt(prompts, None)
+        expanded_meta_str = expanded_meta.numpy()[0].decode("utf-8")
+        self.assertIn("00:00", expanded_meta_str)
+        self.assertIn("01:00", expanded_meta_str)
+        # The non-metadata default "00:01" must NOT appear when frame 60
+        # produces "01:00" instead.
+        self.assertNotIn("00:01", expanded_meta_str)
+
+        # === Fallback restores default after clearing video_metadata ===
+        preprocessor.video_metadata = None
+        expanded_cleared = preprocessor._expand_video_prompt(prompts, None)
+        self.assertEqual(
+            expanded_cleared.numpy()[0], expanded_default.numpy()[0]
+        )
+
     @pytest.mark.kaggle_key_required
     @pytest.mark.extra_large
     def test_all_presets(self):
