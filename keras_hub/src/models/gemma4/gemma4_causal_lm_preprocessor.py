@@ -345,16 +345,14 @@ class Gemma4CausalLMPreprocessor(CausalLMPreprocessor):
 
         batch_size = tf.shape(vision_mask)[0]
         seq_len = tf.shape(token_ids)[-1]
-        if audio_mask is not None:
-            # Generate position IDs that do not increment for audio tokens.
-            non_audio_mask = tf.math.logical_not(audio_mask)
-            position_ids = tf.math.cumsum(tf.cast(non_audio_mask, tf.int32), axis=1) - 1
-            # Ensure position IDs start from 0 and are non-negative.
-            position_ids = tf.maximum(position_ids, 0)
-        else:
-            position_ids = tf.range(seq_len, dtype=tf.int32)
-            position_ids = tf.expand_dims(position_ids, axis=0)
-            position_ids = tf.tile(position_ids, [batch_size, 1])
+        # Use sequential position IDs for all tokens (including audio tokens).
+        # HF does not provide position_ids from the processor; the model
+        # defaults to torch.arange(seq_len), i.e. plain sequential IDs.
+        # Matching this is essential for correct RoPE embeddings on audio
+        # token positions.
+        position_ids = tf.range(seq_len, dtype=tf.int32)
+        position_ids = tf.expand_dims(position_ids, axis=0)
+        position_ids = tf.tile(position_ids, [batch_size, 1])
 
         if text_only_input:
             vision_indices = tf.ones(
