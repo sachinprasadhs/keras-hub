@@ -515,8 +515,14 @@ def _test_audio_preprocessor(preprocessor, raw_audio, hf_input_features):
     print("✓ [Audio] Mel features within 1e-3 tolerance.")
 
 
-def _test_numerics(label, backbone, keras_hub_inputs, hf_logits):
-    """Assert backbone logits match HF logits within 1e-3 tolerance."""
+def _test_numerics(label, backbone, keras_hub_inputs, hf_logits, final_logit_cap=None):
+    """Assert backbone logits match HF logits within 1e-3 tolerance.
+
+    `final_logit_cap` must be passed so that the same softcap transformation
+    applied by HF is also applied to KH's raw logits before comparison.
+    Without it, positions with large raw logits (~67) produce max diffs of
+    ~37 even when the underlying hidden states are identical.
+    """
     if isinstance(keras_hub_inputs, tuple):
         keras_hub_inputs = keras_hub_inputs[0]
 
@@ -543,6 +549,11 @@ def _test_numerics(label, backbone, keras_hub_inputs, hf_logits):
         backbone.token_embedding(kh_output, reverse=True)
     ).astype(np.float32)
 
+    # Apply the same final logit softcap that HF applies in its forward pass.
+    # HF includes this in the returned logits; KH backbone returns raw logits.
+    if final_logit_cap is not None:
+        kh_logits = np.tanh(kh_logits / final_logit_cap) * final_logit_cap
+
     abs_diff = np.abs(kh_logits - hf_logits)
     max_diff = float(np.max(abs_diff))
     mean_diff = float(np.mean(abs_diff))
@@ -559,11 +570,6 @@ def _test_numerics(label, backbone, keras_hub_inputs, hf_logits):
         print(
             f"⚠️  [{label}] Logits exceed 1e-3 tolerance — max={max_diff:.6f}, mean={mean_diff:.6f}, "
             f"matching={pct:.2f}% ({total - mismatched}/{total}).\n"
-            # Audio logit mismatches are expected and acceptable: small numerical
-            # differences in mel-spectrogram computation (windowing, FFT precision)
-            # accumulate through many audio-encoder layers, producing large
-            # per-position divergences.  The generation comparison below is the
-            # authoritative correctness check for audio.
             "    NOTE: Generated text comparison is the authoritative check."
         )
 
@@ -785,13 +791,13 @@ def _verify_model(
         {"prompts": [PROMPT_TEXT]},
         sequence_length=hf_data_text["logits"].shape[1],
     )
-    _test_numerics("text (KH preproc)", backbone, kh_inputs_text, hf_data_text["logits"])
+    _test_numerics("text (KH preproc)", backbone, kh_inputs_text, hf_data_text["logits"], final_logit_cap)
 
     # Image: use HF-preprocessed pixel values to avoid PIL vs KH resize delta.
     kh_inputs_image = _build_preprocessor_free_inputs(
         backbone, hf_data_image, tokenizer.image_placeholder_id
     )
-    _test_numerics("image (HF preproc)", backbone, kh_inputs_image, hf_data_image["logits"])
+    _test_numerics("image (HF preproc)", backbone, kh_inputs_image, hf_data_image["logits"], final_logit_cap)
 
     # Audio: KH mel pipeline aligns with HF within 1e-3.
     if is_audio_model and hf_data_audio is not None:
@@ -811,12 +817,12 @@ def _verify_model(
             hf_data_audio.get("hf_audio_embeddings"), _call_audio_encoder,
         )
         # Numeric test with KH preprocessor (shows full pipeline divergence).
-        _test_numerics("audio (KH preproc)", backbone, kh_inputs_audio, hf_data_audio["logits"])
+        _test_numerics("audio (KH preproc)", backbone, kh_inputs_audio, hf_data_audio["logits"], final_logit_cap)
         # Numeric test with HF encoder outputs injected — isolates decoder accuracy.
         if hf_data_audio.get("hf_audio_embeddings") is not None:
             with _mock_encoder_call(backbone.audio_encoder, hf_data_audio["hf_audio_embeddings"]):
                 _test_numerics(
-                    "audio (HF encoder injected)", backbone, kh_inputs_audio, hf_data_audio["logits"]
+                    "audio (HF encoder injected)", backbone, kh_inputs_audio, hf_data_audio["logits"], final_logit_cap
                 )
 
     # Video: KH video pipeline is consistent with KH image pipeline.
@@ -832,14 +838,14 @@ def _verify_model(
             sequence_length=hf_video_seq_len + 1,
         )
         # Numeric test with KH preprocessor (shows full pipeline divergence).
-        _test_numerics("video (KH preproc)", backbone, kh_inputs_video, hf_data_video["logits"])
+        _test_numerics("video (KH preproc)", backbone, kh_inputs_video, hf_data_video["logits"], final_logit_cap)
         # Numeric test with HF vision encoder outputs injected — isolates decoder accuracy.
         # n_clips = number of frames (each frame is an "image" in the vision encoder).
         if hf_data_video.get("hf_video_embeddings") is not None:
             n_frames = raw_video_sub.shape[0]
             with _mock_encoder_call(backbone.vision_encoder, hf_data_video["hf_video_embeddings"], n_clips=n_frames):
                 _test_numerics(
-                    "video (HF encoder injected)", backbone, kh_inputs_video, hf_data_video["logits"]
+                    "video (HF encoder injected)", backbone, kh_inputs_video, hf_data_video["logits"], final_logit_cap
                 )
         preprocessor.num_frames_per_video = saved_num_frames_per_video
         preprocessor.packer.sequence_length = saved_packer_seq_len
