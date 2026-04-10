@@ -286,11 +286,18 @@ def _precompute_hf_outputs(
     # Capture video embeddings (after embed_vision projection, at text hidden dim).
     _vfe = locals().get("_video_frame_embeds")
     if raw_video is not None and _vfe:
-        # embed_image may be called once per batch of frames or once per frame.
-        # Concatenate along the batch/frame axis then reshape to (1, N*T, H).
-        stacked = np.concatenate(_vfe, axis=0)  # (N_frames, T, H)
-        N, T, Hd = stacked.shape
-        hf_video_embeddings = stacked.reshape(1, N * T, Hd)  # (1, N*T, H)
+        # embed_vision may be called once for the full batch of frames (returning
+        # (N, T, H) or (N*T, H)) or once per frame (returning (T, H) each time).
+        # Concatenate all captured outputs along axis-0 then force a 3-D shape
+        # (1, total_tokens, H) regardless of the original layout.
+        stacked = np.concatenate(_vfe, axis=0)  # (N*T, H) or (N, T, H)
+        if stacked.ndim == 2:
+            total_tokens, Hd = stacked.shape
+        else:
+            # 3-D: flatten frame/patch dims together
+            stacked = stacked.reshape(-1, stacked.shape[-1])
+            total_tokens, Hd = stacked.shape
+        hf_video_embeddings = stacked.reshape(1, total_tokens, Hd)  # (1, N*T, H)
     else:
         hf_video_embeddings = None
 
