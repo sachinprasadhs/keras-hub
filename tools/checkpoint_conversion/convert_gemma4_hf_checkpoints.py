@@ -248,12 +248,12 @@ def _precompute_hf_outputs(
             _hooks.append(
                 _hf_model_inner.embed_audio.register_forward_hook(_audio_hook)
             )
-        if raw_video is not None and hasattr(_hf_model_inner, "embed_image"):
+        if raw_video is not None and hasattr(_hf_model_inner, "embed_vision"):
             _video_frame_embeds = []
             def _video_hook(mod, inp, out):
                 _video_frame_embeds.append(out.detach().cpu().float().numpy())
             _hooks.append(
-                _hf_model_inner.embed_image.register_forward_hook(_video_hook)
+                _hf_model_inner.embed_vision.register_forward_hook(_video_hook)
             )
 
     with torch.no_grad():
@@ -283,7 +283,7 @@ def _precompute_hf_outputs(
                     hf_af = hf_af.last_hidden_state
                 hf_audio_features = hf_af.detach().cpu().float().numpy()
 
-    # Capture video embeddings (after embed_image projection, at text hidden dim).
+    # Capture video embeddings (after embed_vision projection, at text hidden dim).
     _vfe = locals().get("_video_frame_embeds")
     if raw_video is not None and _vfe:
         # embed_image may be called once per batch of frames or once per frame.
@@ -569,12 +569,17 @@ def _test_numerics(label, backbone, keras_hub_inputs, hf_logits):
         )
 
 
-def _test_generate(label, kh_model, prompt, hf_generated_text, **media_kwargs):
+def _test_generate(label, kh_model, prompt, hf_generated_text, max_length=2048 + 64, **media_kwargs):
     """Run KH .generate() and compare output against HF-generated text.
+
+    `max_length` is the total sequence length cap (prompt + response).  For
+    modalities with very long prompts (e.g. video with many frames) the caller
+    should pass a larger value so that generation isn't cut off before any
+    response tokens are produced.
     """
     kh_output = kh_model.generate(
         {"prompts": [prompt], **{k: [v] for k, v in media_kwargs.items()}},
-        max_length=2048 + 64,
+        max_length=max_length,
     )
     kh_text = kh_output[0] if isinstance(kh_output, list) else kh_output
     if isinstance(kh_text, str):
@@ -875,7 +880,9 @@ def _verify_model(
         preprocessor.num_frames_per_video = raw_video_sub.shape[0]
         preprocessor.packer.sequence_length = hf_video_seq_len
         _test_generate(
-            "video", gemma4_lm, PROMPT_VIDEO, hf_data_video["generated_text"], videos=raw_video_sub
+            "video", gemma4_lm, PROMPT_VIDEO, hf_data_video["generated_text"],
+            max_length=hf_video_seq_len + 64,
+            videos=raw_video_sub,
         )
         preprocessor.num_frames_per_video = saved_num_frames_per_video
         preprocessor.packer.sequence_length = saved_packer_seq_len
