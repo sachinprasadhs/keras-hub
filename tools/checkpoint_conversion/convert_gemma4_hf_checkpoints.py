@@ -464,7 +464,7 @@ def _test_encoder_diagnostics(label, kh_encoder, kh_inputs, hf_embeddings, call_
 
 
 @contextlib.contextmanager
-def _mock_encoder_call(encoder, hf_embeddings):
+def _mock_encoder_call(encoder, hf_embeddings, n_clips=1):
     """Temporarily replace encoder.call so it returns pre-computed HF embeddings.
 
     The KH backbone pre-scales encoder outputs by hidden_dim^-0.5 and then
@@ -472,10 +472,13 @@ def _mock_encoder_call(encoder, hf_embeddings):
     the raw encoder output unchanged.  Injecting hf_embeddings directly
     therefore places exactly HF's values at those sequence positions.
 
-    Works for both Gemma4AudioEncoder (regular Layer) and Gemma4VisionEncoder
-    (functional Keras model).
+    hf_embeddings: numpy array (B, T, H) at text hidden size.
+    n_clips: number of clips/images dimension to insert as axis 1.
+             The backbone expects (B, N_clips, T, H) from the encoder.
     """
-    hf_t = ops.convert_to_tensor(hf_embeddings.astype(np.float32))
+    B, T, Hd = hf_embeddings.shape
+    hf_4d = hf_embeddings.reshape(B, n_clips, T // n_clips, Hd).astype(np.float32)
+    hf_t = ops.convert_to_tensor(hf_4d)
     original_call = encoder.call
 
     def mock_call(*args, **kwargs):
@@ -831,8 +834,10 @@ def _verify_model(
         # Numeric test with KH preprocessor (shows full pipeline divergence).
         _test_numerics("video (KH preproc)", backbone, kh_inputs_video, hf_data_video["logits"])
         # Numeric test with HF vision encoder outputs injected — isolates decoder accuracy.
+        # n_clips = number of frames (each frame is an "image" in the vision encoder).
         if hf_data_video.get("hf_video_embeddings") is not None:
-            with _mock_encoder_call(backbone.vision_encoder, hf_data_video["hf_video_embeddings"]):
+            n_frames = raw_video_sub.shape[0]
+            with _mock_encoder_call(backbone.vision_encoder, hf_data_video["hf_video_embeddings"], n_clips=n_frames):
                 _test_numerics(
                     "video (HF encoder injected)", backbone, kh_inputs_video, hf_data_video["logits"]
                 )
