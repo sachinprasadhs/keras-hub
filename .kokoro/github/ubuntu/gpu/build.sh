@@ -60,12 +60,58 @@ sed -i 's/requires-python = ">=3.11"/requires-python = ">=3.10"/' pyproject.toml
 pip install --no-deps -e "." --progress-bar off
 pip install huggingface_hub
 
-# Run Extra Large Tests for Continuous builds
+# Detect changed files
+echo "Detecting changed files..."
+# Fetch master branch to compare against
+git fetch origin master --depth=1 || echo "Failed to fetch origin master, falling back to all tests."
+
+CHANGED_FILES=$(git diff --name-only origin/master...HEAD || true)
+echo "Changed files: $CHANGED_FILES"
+
+CHANGED_MODELS=$(echo "$CHANGED_FILES" | grep 'keras_hub/src/models/' | cut -d/ -f1-4 | sort | uniq || true)
+echo "Changed models: $CHANGED_MODELS"
+
+TEST_TARGET="keras_hub"
+
+# Check for non-model changes that require full tests
+# We ignore API files, tools, and converters as they are usually model-specific or registration
+NON_MODEL_CHANGES=$(echo "$CHANGED_FILES" | \
+  grep -v 'keras_hub/src/models/' | \
+  grep -v 'keras_hub/api/' | \
+  grep -v 'tools/' | \
+  grep -v 'convert_.*\.py$' | \
+  grep -v '\.md$' || true)
+
+if [[ -n "$CHANGED_MODELS" && -z "$NON_MODEL_CHANGES" ]]; then
+  echo "Only model files (and safe whitelisted files) changed. Targeting specific models."
+  TEST_TARGET=""
+  for model_dir in $CHANGED_MODELS; do
+    if [ -d "$model_dir" ]; then
+      TEST_TARGET="$TEST_TARGET $model_dir"
+    fi
+  done
+  # If no valid directories found, fallback to all
+  if [[ -z "$TEST_TARGET" ]]; then
+    TEST_TARGET="keras_hub"
+  fi
+else
+  echo "Non-model files changed or fallback triggered. Running all tests."
+  TEST_TARGET="keras_hub"
+fi
+
+# Check for doc-only changes to skip tests entirely
+NON_DOC_CHANGES=$(echo "$CHANGED_FILES" | grep -v '\.md$' || true)
+if [[ -z "$NON_DOC_CHANGES" && -n "$CHANGED_FILES" ]]; then
+  echo "Only doc fixes detected. Skipping tests."
+  exit 0
+fi
+
+# Run Tests
+PYTEST_ARGS="--check_gpu --run_large"
 if [ "${RUN_XLARGE:-0}" == "1" ]
 then
-   pytest keras_hub --check_gpu --run_large --run_extra_large \
-      --cov=keras_hub
-else
-   pytest keras_hub --check_gpu --run_large \
-      --cov=keras_hub
+   PYTEST_ARGS="$PYTEST_ARGS --run_extra_large"
 fi
+
+echo "Running: pytest $TEST_TARGET $PYTEST_ARGS --cov=keras_hub"
+pytest $TEST_TARGET $PYTEST_ARGS --cov=keras_hub

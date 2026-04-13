@@ -3,6 +3,8 @@ name: Tests
 on:
   push:
   pull_request:
+  pull_request_review:
+    types: [submitted]
   workflow_call:
   release:
     types: [created]
@@ -17,6 +19,7 @@ concurrency:
 jobs:
   run_tests:
     name: Test the code
+    if: github.event_name != 'pull_request_review' || github.event.review.state == 'approved'
     strategy:
       fail-fast: false
       matrix:
@@ -64,8 +67,77 @@ jobs:
         pip uninstall -y keras
         pip install keras-nightly --no-cache-dir --progress-bar off
     - name: Test with pytest
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        pytest keras_hub/
+        RUN_ALL_TESTS=false
+        SKIP_TESTS=false
+        
+        if [[ "${{ github.event_name }}" == "pull_request" || "${{ github.event_name }}" == "pull_request_review" ]]; then
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          echo "Processing PR #$PR_NUMBER"
+          
+          # Check if PR is approved or was approved
+          IS_APPROVED=$(gh pr view $PR_NUMBER --json reviews --jq '.reviews[].state' | grep APPROVED || true)
+          if [[ -n "$IS_APPROVED" ]]; then
+            echo "PR is approved or was approved. Running all tests."
+            RUN_ALL_TESTS=true
+          fi
+          
+          # Fetch base branch to compare
+          git fetch origin ${{ github.base_ref }} --depth=1
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+          
+          # Check for doc-only changes (e.g., only .md files)
+          NON_DOC_CHANGES=$(echo "$CHANGED_FILES" | grep -v '\.md$' || true)
+          if [[ -z "$NON_DOC_CHANGES" && -n "$CHANGED_FILES" ]]; then
+            echo "Only doc fixes detected. Skipping tests."
+            SKIP_TESTS=true
+          fi
+          
+          # Find unique model directories
+          CHANGED_MODELS=$(echo "$CHANGED_FILES" | grep 'keras_hub/src/models/' | cut -d/ -f1-4 | sort | uniq || true)
+          echo "Changed models:"
+          echo "$CHANGED_MODELS"
+          
+        elif [[ "${{ github.event_name }}" == "push" ]]; then
+          echo "Push to branch. Running all tests."
+          RUN_ALL_TESTS=true
+        fi
+        
+        if [[ "$SKIP_TESTS" == "true" ]]; then
+          echo "Skipping tests as requested for doc fixes."
+        elif [[ "$RUN_ALL_TESTS" == "true" ]]; then
+          echo "Running all tests..."
+          pytest keras_hub/
+        else
+          # Check for non-model changes that require full tests
+          # We ignore API files, tools, and converters as they are usually model-specific or registration
+          NON_MODEL_CHANGES=$(echo "$CHANGED_FILES" | \
+            grep -v 'keras_hub/src/models/' | \
+            grep -v 'keras_hub/api/' | \
+            grep -v 'tools/' | \
+            grep -v 'convert_.*\.py$' | \
+            grep -v '\.md$' || true)
+            
+          if [[ -n "$NON_MODEL_CHANGES" ]]; then
+            echo "Non-model code files changed. Running all tests."
+            pytest keras_hub/
+          elif [[ -n "$CHANGED_MODELS" ]]; then
+            echo "Running targeted tests for affected models..."
+            for model_dir in $CHANGED_MODELS; do
+              if [ -d "$model_dir" ]; then
+                echo "Running tests in $model_dir"
+                pytest $model_dir
+              fi
+            done
+          else
+            echo "No specific models identified or fallback triggered. Running all tests."
+            pytest keras_hub/
+          fi
+        fi
     - name: Run integration tests
       run: |
         python pip_build.py --install
