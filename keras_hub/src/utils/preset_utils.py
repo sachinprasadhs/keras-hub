@@ -889,6 +889,36 @@ class KerasPresetSaver:
     def save_task(self, task, max_shard_size=10):
         # Save task specific config and weights.
         self._save_serialized_object(task, TASK_CONFIG_FILE)
+        # Always save generation_config.json to mirror the HF convention.
+        # compile_config (which holds the sampler) is stripped from task.json,
+        # so we persist sampler settings here explicitly.
+        gen_cfg = {}
+        # Token ids from preprocessor tokenizer (bos, eos, pad).
+        tokenizer = None
+        if task.preprocessor is not None:
+            tokenizer = getattr(task.preprocessor, "tokenizer", None)
+        if tokenizer is not None:
+            if hasattr(tokenizer, "start_token_id") and tokenizer.start_token_id is not None:
+                gen_cfg["bos_token_id"] = int(tokenizer.start_token_id)
+            if hasattr(tokenizer, "end_token_id") and tokenizer.end_token_id is not None:
+                gen_cfg["eos_token_id"] = int(tokenizer.end_token_id)
+            if hasattr(tokenizer, "pad_token_id") and tokenizer.pad_token_id is not None:
+                gen_cfg["pad_token_id"] = int(tokenizer.pad_token_id)
+        # Sampler settings.
+        sampler = getattr(task, "sampler", None)
+        if sampler is not None and sampler != "greedy":
+            from keras_hub.src.samplers.greedy_sampler import GreedySampler
+            if not isinstance(sampler, GreedySampler):
+                gen_cfg["do_sample"] = True
+                if hasattr(sampler, "p") and sampler.p is not None:
+                    gen_cfg["top_p"] = float(sampler.p)
+                if hasattr(sampler, "k") and sampler.k is not None:
+                    gen_cfg["top_k"] = int(sampler.k)
+                if hasattr(sampler, "temperature"):
+                    gen_cfg["temperature"] = float(sampler.temperature)
+        gen_cfg_path = os.path.join(self.preset_dir, "generation_config.json")
+        with open(gen_cfg_path, "w") as f:
+            f.write(json.dumps(gen_cfg, indent=4))
         if task.has_task_weights():
             task_weight_path = os.path.join(self.preset_dir, TASK_WEIGHTS_FILE)
             task.save_task_weights(task_weight_path)
@@ -903,7 +933,7 @@ class KerasPresetSaver:
         # Save preprocessor.
         if task.preprocessor and hasattr(task.preprocessor, "save_to_preset"):
             task.preprocessor.save_to_preset(self.preset_dir)
-        else:
+        elif task.preprocessor is not None:
             # Allow saving a `keras.Layer` that is not a preprocessor subclass.
             self.save_preprocessor(task.preprocessor)
 
@@ -942,8 +972,8 @@ class KerasPresetSaver:
         tasks = list_subclasses(Task)
         tasks = filter(lambda x: x.backbone_cls is type(layer), tasks)
         tasks = [task.__base__.__name__ for task in tasks]
-        # Keep task list alphabetical.
-        tasks = sorted(tasks)
+        # Keep task list alphabetical and deduplicated.
+        tasks = sorted(set(tasks))
 
         keras_version = keras.version() if hasattr(keras, "version") else None
         metadata = {

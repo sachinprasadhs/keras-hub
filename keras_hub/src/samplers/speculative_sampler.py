@@ -8,55 +8,61 @@ from keras_hub.src.utils.tensor_utils import any_equal
 
 @keras_hub_export("keras_hub.samplers.SpeculativeSampler")
 class SpeculativeSampler(Sampler):
-    """Speculative Sampler class.
+    """Speculative decoding sampler (Leviathan et al., 2022).
 
-    This sampler implements speculative decoding for accelerated inference.
-    A smaller draft model generates candidate tokens that are verified by
-    the target model in parallel. When draft tokens match target predictions,
-    multiple tokens can be accepted per iteration, providing speedup.
+    Accelerates autoregressive inference by running a small draft model to
+    propose K candidate tokens, then verifying all K+1 positions with the
+    large target model in a single parallel forward pass.
 
-    The algorithm proceeds in three phases per iteration:
-    1. Draft phase: Generate K tokens using the draft model (serial, cheap)
-    2. Verify phase: Check all K tokens with target model (parallel, expensive)
-    3. Accept phase: Accept matching prefix and add one bonus token
+    The algorithm follows three phases per outer iteration:
+      1. **Draft phase**: The draft model auto-regressively generates K tokens.
+      2. **Verify phase**: The target model scores all K+1 positions in one
+         parallel forward pass via `verify_next`.
+      3. **Accept phase**: Tokens are accepted/rejected via rejection sampling
+         (stochastic) or greedy matching. A bonus token is always appended.
+
+    When `base_sampler` is provided, stochastic rejection sampling is used.
+    Otherwise greedy acceptance is used.
 
     Args:
-        num_speculative_tokens: int. Number of tokens to speculatively generate
-            per iteration. Defaults to `5`.
-        draft_temperature: float. Temperature for draft model sampling.
-            Defaults to `1.0`.
-        seed: int. The random seed. Defaults to `None`.
+        num_speculative_tokens: int. Number of draft tokens per outer
+            iteration. Defaults to `5`.
+        base_sampler: optional `keras_hub.samplers.Sampler`. When set,
+            enables stochastic rejection sampling using this sampler's
+            temperature, top-k, and top-p parameters. Defaults to `None`
+            (greedy acceptance).
+        seed: optional int. Random seed for stochastic sampling.
 
     Call arguments:
-        {{call_args}}
-        draft_next: callable. Draft model's next token function with signature
-            `(prompt, cache, index) -> (logits, hidden_states, cache)`.
-        draft_cache: Initial cache for the draft model.
-        verify_next: callable. Optional batch verification function with
-            signature `(prompt, cache, index, k) -> (logits, cache)` where
-            logits has shape `(batch, k+1, vocab)`. Required for speedup.
-
-    Examples:
-    ```python
-    causal_lm = keras_hub.models.GemmaCausalLM.from_preset("gemma_2b_en")
-
-    # Pass by object to compile.
-    sampler = keras_hub.samplers.SpeculativeSampler(num_speculative_tokens=5)
-    causal_lm.compile(sampler=sampler)
-    causal_lm.generate(["Keras is a"])
-    ```
+        next: callable `(prompt, cache, index) → (logits, hidden, cache)`.
+            Target model single-token forward pass (used as fallback when
+            `verify_next` is not provided).
+        prompt: int tensor `(batch, max_length)`. Running token sequence.
+        cache: optional cache tensor.
+        index: int. Current generation position.
+        mask: bool tensor `(batch, max_length)`. True at prompt positions.
+        stop_token_ids: optional sequence of int stop-token ids.
+        model: optional Keras model (needed for JAX stateless scopes).
+        draft_next: **required** callable
+            `(prompt, cache, index) → (logits, hidden, cache)`.
+            Draft model single-token forward pass.
+        draft_cache: optional draft model cache.
+        verify_next: optional callable
+            `(prompt, cache, index, k) → (logits, cache)`.
+            If provided, the target model verifies K+1 positions in a single
+            parallel forward pass (strongly recommended for performance).
     """
 
     def __init__(
         self,
         num_speculative_tokens=5,
-        draft_temperature=1.0,
+        base_sampler=None,
         seed=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.num_speculative_tokens = num_speculative_tokens
-        self.draft_temperature = draft_temperature
+        self.base_sampler = base_sampler
         self.seed = seed
         self.seed_generator = random.SeedGenerator(seed)
 
@@ -76,20 +82,18 @@ class SpeculativeSampler(Sampler):
     ):
         if draft_next is None:
             raise ValueError(
-                "`SpeculativeSampler` requires `draft_next` but received "
-                "`None`."
+                "`SpeculativeSampler` requires a `draft_next` callable."
             )
 
         batch_size = ops.shape(prompt)[0]
         max_length = ops.shape(prompt)[-1]
         index = ops.cast(index, "int32")
-        max_length = ops.cast(max_length, "int32")
         k = self.num_speculative_tokens
 
-        mask = ops.zeros_like(prompt, dtype="bool") if mask is None else mask
-        mask = ops.cast(mask, dtype="bool")
+        if mask is None:
+            mask = ops.zeros_like(prompt, dtype="bool")
+        mask = ops.cast(mask, "bool")
 
-        # `ops.while_loop` will not accept `None` as a value for `loop_vars`.
         has_cache = cache is not None
         has_draft_cache = draft_cache is not None
         cache = cache if has_cache else ()
@@ -100,121 +104,288 @@ class SpeculativeSampler(Sampler):
                 return index < max_length
             end_tokens = any_equal(prompt, stop_token_ids, ~mask)
             prompt_done = ops.any(end_tokens, axis=-1)
-            still_going = ops.logical_not(ops.all(prompt_done))
-            return ops.logical_and(still_going, index < max_length)
+            return ops.logical_and(
+                ops.logical_not(ops.all(prompt_done)),
+                index < max_length,
+            )
 
         def body(prompt, cache, draft_cache, index):
-            # Phase 1: Draft K tokens serially.
-            draft_ids = []
-            current_prompt = prompt
             current_draft_cache = draft_cache if has_draft_cache else None
 
+            # ── Phase 1: Draft K tokens ───────────────────────────────────
+            # We run the draft model K times, each time writing the predicted
+            # token into the running prompt buffer.  Draft logits and token
+            # ids are collected for the acceptance step.
+            #
+            # We represent the evolving draft state as a pair of accumulators
+            # that we update via scan-style tensor ops so the body remains
+            # compatible with ops.while_loop (no Python-level iteration inside
+            # the traced graph).
+            current_prompt = prompt
+            draft_ids_list = []
+            draft_probs_list = []
+
             for i in range(k):
-                actual_idx = index + i
-                safe_idx = ops.minimum(actual_idx, max_length - 1)
+                # Clamp the index to [0, max_length - 1] for safety.
+                safe_idx = ops.minimum(
+                    ops.cast(index + i, "int32"), max_length - 1
+                )
                 logits, _, current_draft_cache = draft_next(
                     current_prompt, current_draft_cache, safe_idx
                 )
+                # (batch, vocab)
                 probs = self.compute_probabilities(logits)
-                probs = ops.cast(probs, "float32") / self.draft_temperature
-                next_token = ops.argmax(probs, axis=-1)
-                next_token = ops.cast(next_token, current_prompt.dtype)
 
-                # Handle masked positions.
-                in_bounds = actual_idx < max_length
-                mask_val = ops.take(mask, [safe_idx], axis=1)[:, 0]
-                prompt_val = ops.take(current_prompt, [safe_idx], axis=1)[:, 0]
-                next_token = ops.where(mask_val, prompt_val, next_token)
-                next_token = ops.where(in_bounds, next_token, prompt_val)
+                if self.base_sampler is not None:
+                    # Sample according to the base sampler's distribution.
+                    next_token = self.base_sampler.get_next_token(probs)
+                else:
+                    next_token = ops.argmax(probs, axis=-1)
+
+                next_token = ops.cast(next_token, prompt.dtype)
+
+                # Respect existing prompt tokens (mask).
+                mask_val = mask[:, safe_idx]
+                existing = current_prompt[:, safe_idx]
+                in_bounds = ops.cast(
+                    (index + i) < max_length, next_token.dtype
+                )
+                next_token = ops.where(mask_val, existing, next_token)
+                next_token = ops.where(
+                    ops.cast(in_bounds, "bool"), next_token, existing
+                )
 
                 current_prompt = ops.slice_update(
                     current_prompt, [0, safe_idx], next_token[:, None]
                 )
-                draft_ids.append(next_token)
+                draft_ids_list.append(next_token)
+                draft_probs_list.append(probs)
 
-            draft_ids = ops.stack(draft_ids, axis=1)
-            prompt_with_drafts = current_prompt
+            # Stack: (batch, k), (batch, k, vocab)
+            draft_ids = ops.stack(draft_ids_list, axis=1)
+            q_probs = ops.stack(draft_probs_list, axis=1)
 
-            # Phase 2: Verify with target model.
+            # ── Phase 2: Verify with target model ─────────────────────────
             if verify_next is not None:
+                # Single parallel forward pass covering positions
+                # [index-1 .. index+k-1] (k+1 positions total).
                 target_logits, updated_cache = verify_next(
-                    prompt_with_drafts, cache if has_cache else None, index, k
+                    current_prompt,
+                    cache if has_cache else None,
+                    index,
+                    k,
                 )
             else:
-                # Fallback to serial verification (no speedup).
+                # Fallback: serial verification (slower).
                 logits_list = []
                 current_cache = cache if has_cache else None
                 for i in range(k + 1):
-                    safe_idx = ops.minimum(index + i, max_length - 1)
+                    safe_idx = ops.minimum(
+                        ops.cast(index + i, "int32"), max_length - 1
+                    )
                     logits, _, current_cache = next(
-                        prompt_with_drafts, current_cache, safe_idx
+                        current_prompt, current_cache, safe_idx
                     )
                     logits_list.append(logits)
                 target_logits = ops.stack(logits_list, axis=1)
                 updated_cache = current_cache
 
-            # Phase 3: Compute matching prefix.
+            # target_logits: (batch, k+1, vocab)
             target_probs = self.compute_probabilities(target_logits)
-            target_tokens = ops.argmax(target_probs[:, :k, :], axis=-1)
-            target_tokens = ops.cast(target_tokens, prompt.dtype)
+            # p_probs: (batch, k, vocab)  — the K verification distributions
+            p_probs = target_probs[:, :k, :]
 
-            matches = ops.equal(draft_ids, target_tokens)
+            # Refresh the target-cache slot inside draft_cache so that
+            # draft_next in the next outer iteration conditions on the freshly
+            # written K/V entries instead of the initial (stale) cache.
+            if (
+                has_draft_cache
+                and has_cache
+                and isinstance(draft_cache, tuple)
+                and len(draft_cache) == 2
+            ):
+                current_draft_cache = (current_draft_cache[0], updated_cache)
+
+            # ── Phase 3: Accept / reject via rejection sampling ───────────
+            if self.base_sampler is not None:
+                # Stochastic acceptance (Leviathan et al., 2022 Algorithm 1).
+                # For each draft position i:
+                #   Accept token t_i if Uniform(0,1) < p(t_i) / q(t_i).
+                gather_idx = ops.expand_dims(
+                    ops.cast(draft_ids, "int32"), axis=-1
+                )
+                p_target = ops.take_along_axis(
+                    p_probs, gather_idx, axis=-1
+                )[:, :, 0]
+                q_draft = ops.take_along_axis(
+                    q_probs, gather_idx, axis=-1
+                )[:, :, 0]
+
+                r = random.uniform(
+                    shape=ops.shape(p_target),
+                    seed=self.seed_generator,
+                    dtype="float32",
+                )
+                matches = (r * q_draft) < p_target
+            else:
+                # Greedy acceptance: token matches if argmax(p) == draft_id.
+                target_tokens = ops.cast(
+                    ops.argmax(p_probs, axis=-1), prompt.dtype
+                )
+                matches = ops.equal(draft_ids, target_tokens)
+
+            # Compute the prefix of accepted tokens (all must match up to i).
+            # num_accepted[b] = length of the accepted prefix for item b.
             matches_int = ops.cast(matches, "int32")
             prefix_mask = ops.cumprod(matches_int, axis=1)
-            num_accepted = ops.sum(prefix_mask, axis=1)
+            num_accepted = ops.sum(prefix_mask, axis=1)  # (batch,)
 
-            # Update prompt with accepted tokens.
+            # Write accepted draft tokens back into the output prompt.
             final_prompt = prompt
             for i in range(k):
-                safe_idx = ops.minimum(index + i, max_length - 1)
-                in_bounds = (index + i) < max_length
-                position = ops.full((batch_size,), i, dtype="int32")
-                is_accepted = ops.logical_and(
-                    position < num_accepted, in_bounds
+                safe_idx = ops.minimum(
+                    ops.cast(index + i, "int32"), max_length - 1
                 )
-
-                draft_token = draft_ids[:, i]
-                mask_val = ops.take(mask, [safe_idx], axis=1)[:, 0]
-                existing = ops.take(final_prompt, [safe_idx], axis=1)[:, 0]
-
-                token = ops.where(is_accepted, draft_token, existing)
-                token = ops.where(mask_val, existing, token)
-                token = ops.cast(token, prompt.dtype)
+                is_accepted = ops.logical_and(
+                    ops.cast(i, "int32") < num_accepted,
+                    (index + i) < max_length,
+                )
+                token = ops.where(
+                    is_accepted,
+                    draft_ids[:, i],
+                    final_prompt[:, safe_idx],
+                )
                 final_prompt = ops.slice_update(
                     final_prompt, [0, safe_idx], token[:, None]
                 )
 
-            # Add bonus token from target model.
-            safe_num = ops.minimum(num_accepted, k)
-            gather_idx = safe_num[:, None, None]
-            gather_idx = ops.broadcast_to(
-                gather_idx, (batch_size, 1, ops.shape(target_probs)[-1])
-            )
-            bonus_probs = ops.take_along_axis(target_probs, gather_idx, axis=1)[
-                :, 0, :
-            ]
-            bonus_token = ops.argmax(bonus_probs, axis=-1)
-            bonus_token = ops.cast(bonus_token, prompt.dtype)
-
-            min_accepted = ops.min(num_accepted)
-            bonus_idx = index + min_accepted
+            # ── Bonus token (always appended) ─────────────────────────────
+            # Use the minimum accepted count across the batch so we advance
+            # the index by a common amount.
+            min_accepted = ops.min(num_accepted)  # scalar int
+            bonus_idx = ops.cast(index + min_accepted, "int32")
             safe_bonus_idx = ops.minimum(bonus_idx, max_length - 1)
-            in_bounds = bonus_idx < max_length
 
-            mask_val = ops.take(mask, [safe_bonus_idx], axis=1)[:, 0]
-            existing = ops.take(final_prompt, [safe_bonus_idx], axis=1)[:, 0]
-            bonus_token = ops.where(in_bounds, bonus_token, existing)
-            bonus_token = ops.where(mask_val, existing, bonus_token)
+            if self.base_sampler is not None:
+                # Residual distribution for rejected positions:
+                #   p_bonus = max(0, p_target - q_draft) / Z
+                # When all K tokens were accepted, sample from p_target
+                # directly (no residual needed).
+                # Use ops.gather with scalar min_accepted to stay in-graph.
+                gather_bonus = ops.expand_dims(
+                    ops.broadcast_to(
+                        ops.expand_dims(min_accepted, axis=0),
+                        (batch_size,),
+                    ),
+                    axis=-1,
+                )  # (batch, 1)
+                gather_bonus = ops.expand_dims(
+                    gather_bonus, axis=-1
+                )  # (batch, 1, 1)
+                vocab = ops.shape(target_probs)[-1]
+                gather_bonus_b = ops.broadcast_to(
+                    gather_bonus, (batch_size, 1, vocab)
+                )
+
+                p_b = ops.take_along_axis(
+                    target_probs, gather_bonus_b, axis=1
+                )[:, 0, :]
+
+                # Clamp to avoid negative probabilities from floating-point
+                # error.
+                safe_q_idx = ops.minimum(
+                    ops.cast(min_accepted, "int32"),
+                    ops.cast(k - 1, "int32"),
+                )
+                gather_q = ops.expand_dims(
+                    ops.broadcast_to(
+                        ops.expand_dims(safe_q_idx, axis=0), (batch_size,)
+                    ),
+                    axis=-1,
+                )
+                gather_q = ops.expand_dims(gather_q, axis=-1)
+                gather_q_b = ops.broadcast_to(
+                    gather_q, (batch_size, 1, vocab)
+                )
+                q_b = ops.take_along_axis(
+                    q_probs, gather_q_b, axis=1
+                )[:, 0, :]
+
+                all_accepted = ops.equal(min_accepted, ops.cast(k, "int32"))
+                res_probs = ops.maximum(
+                    ops.cast(0.0, p_b.dtype),
+                    ops.cast(p_b, p_b.dtype) - ops.cast(q_b, p_b.dtype),
+                )
+                res_sum = (
+                    ops.sum(res_probs, axis=-1, keepdims=True)
+                    + ops.cast(1e-7, res_probs.dtype)
+                )
+                res_probs = res_probs / res_sum
+
+                # When all K tokens accepted, fall through to p_b directly.
+                # all_accepted is a scalar bool; ops.where broadcasts it
+                # over (batch, vocab) without needing explicit indexing.
+                bonus_probs = ops.where(all_accepted, p_b, res_probs)
+
+                # Gumbel-max trick for differentiable argmax sampling.
+                uniform_noise = random.uniform(
+                    shape=ops.shape(bonus_probs),
+                    seed=self.seed_generator,
+                    dtype="float32",
+                )
+                gumbel = -ops.log(
+                    -ops.log(uniform_noise + ops.cast(1e-7, "float32"))
+                )
+                bonus_token = ops.argmax(
+                    ops.log(
+                        ops.cast(bonus_probs, "float32")
+                        + ops.cast(1e-7, "float32")
+                    )
+                    + gumbel,
+                    axis=-1,
+                )
+            else:
+                # Greedy bonus: argmax of the target distribution at position
+                # min_accepted.
+                gather_bonus = ops.expand_dims(
+                    ops.broadcast_to(
+                        ops.expand_dims(min_accepted, axis=0),
+                        (batch_size,),
+                    ),
+                    axis=-1,
+                )
+                gather_bonus = ops.expand_dims(gather_bonus, axis=-1)
+                vocab = ops.shape(target_probs)[-1]
+                gather_bonus_b = ops.broadcast_to(
+                    gather_bonus, (batch_size, 1, vocab)
+                )
+                bonus_probs = ops.take_along_axis(
+                    target_probs, gather_bonus_b, axis=1
+                )[:, 0, :]
+                bonus_token = ops.argmax(bonus_probs, axis=-1)
+
+            bonus_token = ops.cast(bonus_token, prompt.dtype)
+            existing_bonus = final_prompt[:, safe_bonus_idx]
+            in_bounds = ops.cast(bonus_idx < max_length, "bool")
+            bonus_token = ops.where(in_bounds, bonus_token, existing_bonus)
             final_prompt = ops.slice_update(
                 final_prompt, [0, safe_bonus_idx], bonus_token[:, None]
             )
 
-            new_index = ops.minimum(index + min_accepted + 1, max_length)
+            # Advance by min_accepted + 1 (the bonus token).
+            new_index = ops.minimum(
+                bonus_idx + ops.cast(1, "int32"),
+                ops.cast(max_length, "int32"),
+            )
 
             return (
                 final_prompt,
                 updated_cache if has_cache else cache,
-                current_draft_cache if has_draft_cache else draft_cache,
+                (
+                    current_draft_cache
+                    if has_draft_cache
+                    else draft_cache
+                ),
                 new_index,
             )
 
@@ -228,11 +399,16 @@ class SpeculativeSampler(Sampler):
         return prompt
 
     def get_config(self):
+        base_sampler_config = None
+        if self.base_sampler is not None:
+            from keras_hub.src.samplers.serialization import serialize
+
+            base_sampler_config = serialize(self.base_sampler)
         config = super().get_config()
         config.update(
             {
                 "num_speculative_tokens": self.num_speculative_tokens,
-                "draft_temperature": self.draft_temperature,
+                "base_sampler": base_sampler_config,
                 "seed": self.seed,
             }
         )

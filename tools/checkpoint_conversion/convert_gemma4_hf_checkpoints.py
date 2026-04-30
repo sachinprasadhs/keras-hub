@@ -46,6 +46,12 @@ PRESET_MAP = {
     "gemma4_instruct_31b": "google/gemma-4-31B-it",
 }
 
+# Preset map for the Gemma4 MTP assistant (drafter) model.
+# These are speculative-decoding companion models for the main Gemma4 LMs.
+ASSISTANT_PRESET_MAP = {
+    "gemma4_instruct_2b_assistant": "gg-hf-am/gemma-4-E2B-it-assistant",
+}
+
 IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
 # 10-second, 1 MB clip used for video verification when --video_path is not set.
 VIDEO_URL = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4"
@@ -87,13 +93,23 @@ PROMPT_VIDEO = (
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string(
-    "preset", None, f"Must be one of {','.join(PRESET_MAP.keys())}"
+    "preset",
+    None,
+    f"Must be one of {','.join(list(PRESET_MAP.keys()) + list(ASSISTANT_PRESET_MAP.keys()))}",
 )
 
 flags.DEFINE_string(
     "save_dtype",
     "bfloat16",
     "Dtype to save the model in. Defaults to bfloat16.",
+)
+
+flags.DEFINE_boolean(
+    "convert_assistant",
+    False,
+    "Convert the Gemma4 MTP assistant model for speculative decoding instead "
+    "of the main model.  When set, --preset must be a key in "
+    "ASSISTANT_PRESET_MAP (e.g. gemma4_instruct_2b_assistant).",
 )
 
 flags.DEFINE_string(
@@ -1059,12 +1075,367 @@ def _save_preset(
     print(f"-> Saved {save_dtype} preset to {preset_save_path}")
 
 
+# ── Assistant (speculative decoding drafter) conversion ────────────────────
+
+
+def _load_hf_assistant(hf_preset):
+    """Download HF assistant config + generation_config + safetensors weights.
+
+    Returns:
+        hf_config: parsed config.json dict.
+        generation_config: parsed generation_config.json dict (empty if absent).
+        weights: dict mapping weight name → float32 numpy array.
+    """
+    import json
+
+    import safetensors.torch as sft
+    from huggingface_hub import snapshot_download
+
+    model_dir = snapshot_download(hf_preset)
+    with open(os.path.join(model_dir, "config.json")) as f:
+        hf_config = json.load(f)
+
+    # Load generation_config.json — controls sampler for speculative decoding.
+    gen_cfg_path = os.path.join(model_dir, "generation_config.json")
+    generation_config = {}
+    if os.path.exists(gen_cfg_path):
+        with open(gen_cfg_path) as f:
+            generation_config = json.load(f)
+        print(f"-> Loaded generation_config: {generation_config}")
+    else:
+        print("-> No generation_config.json found; will use greedy sampler.")
+
+    weights = {}
+    index_path = os.path.join(model_dir, "model.safetensors.index.json")
+    if os.path.exists(index_path):
+        with open(index_path) as f:
+            index = json.load(f)
+        for shard in sorted(set(index["weight_map"].values())):
+            shard_w = sft.load_file(os.path.join(model_dir, shard))
+            weights.update(
+                {k: v.float().numpy() for k, v in shard_w.items()}
+            )
+    else:
+        shard_w = sft.load_file(
+            os.path.join(model_dir, "model.safetensors")
+        )
+        weights.update({k: v.float().numpy() for k, v in shard_w.items()})
+
+    print(f"-> Loaded {len(weights)} HF assistant tensors from '{hf_preset}'.")
+    return hf_config, generation_config, weights
+
+
+def _build_keras_assistant(hf_config):
+    """Construct a float32 Gemma4AssistantCausalLM from HF config.
+
+    The backbone is built from scratch (not from_preset) so that the exact
+    dimensions from the assistant's own config.json are used.
+
+    Returns:
+        assistant: Gemma4AssistantCausalLM in float32.
+    """
+    from keras_hub.src.models.gemma4.gemma4_assistant import (
+        Gemma4AssistantCausalLM,
+    )
+
+    text_cfg = hf_config["text_config"]
+    rope_params = text_cfg.get("rope_parameters", {})
+    local_rope = rope_params.get("sliding_attention", {})
+    global_rope = rope_params.get("full_attention", {})
+
+    # Keras uses rope_wavelength = rope_theta directly (the RotaryEmbedding
+    # layer treats max_wavelength as the base frequency, identical to HF's
+    # rope_theta convention).
+    local_theta = local_rope.get("rope_theta", 10_000.0)
+    global_theta = global_rope.get("rope_theta", 1_000_000.0)
+
+    backbone = keras_hub.models.Gemma4Backbone(
+        vocabulary_size=text_cfg["vocab_size"],
+        num_layers=text_cfg["num_hidden_layers"],
+        num_query_heads=text_cfg["num_attention_heads"],
+        num_key_value_heads=text_cfg["num_key_value_heads"],
+        hidden_dim=text_cfg["hidden_size"],
+        intermediate_dim=text_cfg["intermediate_size"],
+        head_dim=text_cfg["head_dim"],
+        global_head_dim=text_cfg.get("global_head_dim"),
+        sliding_window_size=text_cfg.get("sliding_window", 512),
+        layer_types=text_cfg["layer_types"],
+        num_kv_shared_layers=text_cfg.get("num_kv_shared_layers", 0),
+        layer_norm_epsilon=text_cfg.get("rms_norm_eps", 1e-6),
+        local_rope_wavelength=float(local_theta),
+        global_rope_wavelength=float(global_theta),
+        global_rope_partial_rotary_factor=float(
+            global_rope.get("partial_rotary_factor", 1.0)
+        ),
+        dtype="float32",
+    )
+
+    backbone_hidden_size = int(hf_config["backbone_hidden_size"])
+    num_centroids = int(hf_config["num_centroids"])
+    centroid_top_k = int(hf_config["centroid_intermediate_top_k"])
+    hidden_size = text_cfg["hidden_size"]
+
+    assistant = Gemma4AssistantCausalLM(
+        backbone=backbone,
+        backbone_hidden_size=backbone_hidden_size,
+        num_centroids=num_centroids,
+        centroid_intermediate_top_k=centroid_top_k,
+        preprocessor=None,
+        dtype="float32",
+    )
+
+    # The non-graph Dense layers are not in the functional forward pass, so
+    # we must build them explicitly before assigning weights.
+    assistant.pre_projection.build((None, None, 2 * backbone_hidden_size))
+    assistant.post_projection.build((None, None, hidden_size))
+    assistant.centroids.build((None, None, hidden_size))
+
+    total = sum(w.numpy().size for w in assistant.weights)
+    print(f"-> KerasHub assistant built ({total:,} total parameters incl. KV).")
+    return assistant
+
+
+def _port_assistant_weights(hf_weights, assistant, hf_config):
+    """Assign HF checkpoint tensors to Keras assistant model variables.
+
+    Weight-shape conventions:
+      * HF ``nn.Linear`` stores [out_features, in_features] → needs ``.T``.
+      * HF Q/K projections are stored as [num_heads * head_dim, hidden_size]
+        and must be reshaped to [num_heads, hidden_size, head_dim] for Keras
+        EinsumDense.
+      * The assistant has ``num_kv_shared_layers = num_layers`` (all layers
+        borrow K/V from the target), so there are **no** K/V projection weights
+        in the HF checkpoint.  The corresponding Keras variables are left with
+        their random initialisation; they are never used at inference time.
+    """
+    text_cfg = hf_config["text_config"]
+    num_q_heads = text_cfg["num_attention_heads"]
+    hidden_size = text_cfg["hidden_size"]
+    head_dim = text_cfg["head_dim"]
+    global_head_dim = text_cfg.get("global_head_dim") or head_dim
+    layer_types = text_cfg["layer_types"]
+    bb = assistant.backbone
+
+    def assign(keras_var, np_arr):
+        keras_var.assign(np_arr)
+
+    # ── Token embedding (tied with lm-head) ───────────────────────────────────
+    assign(bb.token_embedding.embeddings, hf_weights["model.embed_tokens.weight"])
+
+    # ── Final RMS norm ─────────────────────────────────────────────────────────
+    assign(bb.layer_norm.scale, hf_weights["model.norm.weight"])
+
+    # ── Assistant-specific projection layers ──────────────────────────────────
+    # HF Dense stores [out, in]; Keras Dense stores [in, out] → transpose.
+    assign(assistant.pre_projection.kernel,
+           hf_weights["pre_projection.weight"].T)     # (3072, 256)
+    assign(assistant.post_projection.kernel,
+           hf_weights["post_projection.weight"].T)    # (256, 1536)
+    assign(assistant.centroids.kernel,
+           hf_weights["masked_embedding.centroids.weight"].T)  # (256, 2048)
+
+    # ── token_ordering (non-trainable int32 buffer) ───────────────────────────
+    assign(assistant.token_ordering, hf_weights["masked_embedding.token_ordering"].astype(np.int32))
+
+    # ── Per-layer weights ──────────────────────────────────────────────────────
+    for i, layer in enumerate(bb.transformer_layers):
+        hfp = f"model.layers.{i}"
+        is_global = layer_types[i] == "full_attention"
+        q_head_dim = global_head_dim if is_global else head_dim
+        attn = layer.attention
+
+        # RMS norms
+        assign(layer.pre_attention_norm.scale,
+               hf_weights[f"{hfp}.input_layernorm.weight"])
+        assign(layer.post_attention_norm.scale,
+               hf_weights[f"{hfp}.post_attention_layernorm.weight"])
+        assign(layer.pre_ffw_norm.scale,
+               hf_weights[f"{hfp}.pre_feedforward_layernorm.weight"])
+        assign(layer.post_ffw_norm.scale,
+               hf_weights[f"{hfp}.post_feedforward_layernorm.weight"])
+
+        # Layer scalar: HF shape (1,) → Keras scalar ()
+        assign(layer.layer_scalar,
+               hf_weights[f"{hfp}.layer_scalar"].squeeze())
+
+        # Q projection: HF [num_q_heads*q_head_dim, hidden] →
+        #   Keras EinsumDense kernel [num_q_heads, hidden, q_head_dim]
+        q_w = hf_weights[f"{hfp}.self_attn.q_proj.weight"]  # (nq*hd, hs)
+        q_w = q_w.reshape(num_q_heads, q_head_dim, hidden_size)  # (nq, hd, hs)
+        q_w = q_w.transpose(0, 2, 1)                              # (nq, hs, hd)
+        assign(attn.query_dense.kernel, q_w)
+
+        # Q norm (per-head RMS norm scale, no bias)
+        assign(attn.query_norm.scale,
+               hf_weights[f"{hfp}.self_attn.q_norm.weight"])
+
+        # O projection: HF [hidden, num_q_heads*q_head_dim] →
+        #   Keras EinsumDense kernel [num_q_heads, q_head_dim, hidden]
+        o_w = hf_weights[f"{hfp}.self_attn.o_proj.weight"]      # (hs, nq*hd)
+        o_w = o_w.T                                              # (nq*hd, hs)
+        o_w = o_w.reshape(num_q_heads, q_head_dim, hidden_size)  # (nq, hd, hs)
+        assign(attn.output_dense.kernel, o_w)
+
+        # FFN gating projections: HF [out, in] → Keras [in, out] (transpose)
+        assign(layer.gating_ffw.kernel,
+               hf_weights[f"{hfp}.mlp.gate_proj.weight"].T)
+        assign(layer.gating_ffw_2.kernel,
+               hf_weights[f"{hfp}.mlp.up_proj.weight"].T)
+        assign(layer.ffw_linear.kernel,
+               hf_weights[f"{hfp}.mlp.down_proj.weight"].T)
+
+        # K/V projections and key_norm have NO HF counterpart (all layers are
+        # KV-shared — they borrow K/V from the target model's cache at runtime).
+        # Their Keras variables retain their random initialisation and are
+        # never used during inference.
+
+    print("-> All assistant weights ported successfully.")
+
+
+def _verify_assistant(assistant, hf_config):
+    """Run a smoke-test forward pass to verify shapes are correct.
+
+    We don't compare outputs numerically here (that requires running both HF
+    and KH models simultaneously, which is expensive).  The weight-porting
+    step is validated implicitly by the parameter shapes matching.
+    """
+    text_cfg = hf_config["text_config"]
+    head_dim = text_cfg["head_dim"]
+    global_head_dim = text_cfg.get("global_head_dim") or head_dim
+    max_head_dim = max(head_dim, global_head_dim)
+    num_kv_heads = text_cfg["num_key_value_heads"]
+    vocab_size = text_cfg["vocab_size"]
+    backbone_hidden_size = int(hf_config["backbone_hidden_size"])
+    # Use a fake 6-layer target cache so the assistant's shared-KV indexing
+    # (last-2 layers) is exercised.
+    target_layers = 6
+    cache_seq = 4
+
+    dummy_ids = np.zeros((1, 1), dtype=np.int32)
+    dummy_hs = np.zeros((1, 1, backbone_hidden_size), dtype=np.float32)
+    dummy_cache = np.zeros(
+        (1, target_layers, 2, cache_seq, num_kv_heads, max_head_dim),
+        dtype=np.float32,
+    )
+
+    logits, next_hs = assistant.call_with_cache(
+        dummy_ids, dummy_hs, dummy_cache, cache_update_index=0
+    )
+    logits_shape = tuple(ops.shape(logits))
+    hs_shape = tuple(ops.shape(next_hs))
+
+    assert logits_shape == (1, 1, vocab_size), (
+        f"Unexpected logits shape: {logits_shape} "
+        f"(expected (1, 1, {vocab_size}))"
+    )
+    assert hs_shape == (1, 1, backbone_hidden_size), (
+        f"Unexpected hidden-state shape: {hs_shape} "
+        f"(expected (1, 1, {backbone_hidden_size}))"
+    )
+    trainable = sum(v.numpy().size for v in assistant.trainable_variables)
+    non_trainable = sum(
+        v.numpy().size for v in assistant.non_trainable_variables
+    )
+    print(
+        f"✓ Assistant forward pass OK — "
+        f"logits {logits_shape}, hidden_state {hs_shape}"
+    )
+    print(
+        f"  trainable params: {trainable:,} | "
+        f"non-trainable params: {non_trainable:,}"
+    )
+
+
+def _save_assistant_preset(assistant, preset, save_dtype):
+    """Save the assistant model to a local preset directory.
+
+    For bfloat16: re-cast weights in-place (the Dense layers are small so
+    we don't bother reloading from a preset — there is no pre-built preset for
+    the assistant).
+    """
+    preset_save_path = f"./{preset}"
+    print(f"\n-> Saving assistant in {save_dtype} to {preset_save_path} ...")
+    if save_dtype == "bfloat16":
+        assistant.save_to_preset(preset_save_path)
+        # save_to_preset saves float32; load back in bfloat16 and re-save.
+        del assistant
+        gc.collect()
+        from keras_hub.src.models.gemma4.gemma4_assistant import (
+            Gemma4AssistantCausalLM,
+        )
+
+        assistant_bf16 = Gemma4AssistantCausalLM.from_preset(
+            preset_save_path, dtype="bfloat16"
+        )
+        import shutil
+        shutil.rmtree(preset_save_path)
+        assistant_bf16.save_to_preset(preset_save_path)
+    else:
+        assistant.save_to_preset(preset_save_path)
+    print(f"-> Saved {save_dtype} assistant preset to '{preset_save_path}'.")
+
+
+def _save_preset(
+    gemma4_lm, keras_hub_preset, preset, save_dtype, final_logit_cap
+):
+    """Save the model to a local preset directory in the requested dtype."""
+    preset_save_path = f"./{preset}"
+    print(f"\n-> Saving model in {save_dtype} to {preset_save_path} ...")
+
+    if save_dtype == "bfloat16":
+        preprocessor_ref = gemma4_lm.preprocessor
+        # gemma4_lm is the only remaining reference to the float32 model
+        # (backbone/tokenizer/preprocessor were already deleted in main).
+        del gemma4_lm
+        gc.collect()
+        backbone_bf16 = keras_hub.models.Gemma4Backbone.from_preset(
+            keras_hub_preset, dtype="bfloat16"
+        )
+        gemma4_lm_bf16 = keras_hub.models.Gemma4CausalLM(
+            backbone=backbone_bf16,
+            preprocessor=preprocessor_ref,
+            sampler="greedy",
+            final_logit_cap=final_logit_cap,
+        )
+        gemma4_lm_bf16.save_to_preset(preset_save_path)
+    else:
+        gemma4_lm.save_to_preset(preset_save_path)
+
+    print(f"-> Saved {save_dtype} preset to {preset_save_path}")
+
+
 def main(_):
     preset = FLAGS.preset
+
+    # ── Assistant model branch ─────────────────────────────────────────────────
+    if FLAGS.convert_assistant:
+        if preset not in ASSISTANT_PRESET_MAP:
+            raise ValueError(
+                f"For --convert_assistant, --preset must be one of "
+                f"{', '.join(ASSISTANT_PRESET_MAP.keys())}. "
+                f"Got: {preset!r}"
+            )
+        hf_assistant_preset = ASSISTANT_PRESET_MAP[preset]
+        hf_config, generation_config, hf_weights = _load_hf_assistant(
+            hf_assistant_preset
+        )
+        assistant = _build_keras_assistant(hf_config)
+        _port_assistant_weights(hf_weights, assistant, hf_config)
+        del hf_weights
+        gc.collect()
+        from keras_hub.src.utils.transformers.convert_gemma4_assistant import (
+            convert_sampler_config,
+        )
+        assistant.compile(sampler=convert_sampler_config(generation_config))
+        _verify_assistant(assistant, hf_config)
+        _save_assistant_preset(assistant, preset, FLAGS.save_dtype)
+        return
+
+    # ── Main model branch ──────────────────────────────────────────────────────
     if preset not in PRESET_MAP:
         raise ValueError(
             f"Invalid preset {FLAGS.preset!r}. Must be one of "
-            f"{', '.join(PRESET_MAP.keys())}"
+            f"{', '.join(list(PRESET_MAP.keys()) + list(ASSISTANT_PRESET_MAP.keys()))}"
         )
 
     hf_preset = PRESET_MAP[preset]

@@ -17,6 +17,7 @@ from keras_hub.src.utils.transformers import convert_gemma
 from keras_hub.src.utils.transformers import convert_gemma3
 from keras_hub.src.utils.transformers import convert_gemma3n
 from keras_hub.src.utils.transformers import convert_gemma4
+from keras_hub.src.utils.transformers import convert_gemma4_assistant
 from keras_hub.src.utils.transformers import convert_gpt2
 from keras_hub.src.utils.transformers import convert_gpt_oss
 from keras_hub.src.utils.transformers import convert_llama3
@@ -65,6 +66,8 @@ class TransformersPresetLoader(PresetLoader):
             self.converter = convert_gemma3n
         elif model_type in ("gemma4", "gemma4_text"):
             self.converter = convert_gemma4
+        elif model_type == "gemma4_assistant":
+            self.converter = convert_gemma4_assistant
         elif model_type == "gpt2":
             self.converter = convert_gpt2
         elif model_type == "gpt_oss":
@@ -144,6 +147,14 @@ class TransformersPresetLoader(PresetLoader):
         if load_task_weights:
             with SafetensorLoader(self.preset, prefix="") as loader:
                 self.converter.convert_head(task, loader, self.config)
+        if hasattr(self.converter, "convert_sampler_config"):
+            from keras_hub.src.utils.preset_utils import check_file_exists
+            from keras_hub.src.utils.preset_utils import get_file
+            if check_file_exists(self.preset, "generation_config.json"):
+                import json
+                with open(get_file(self.preset, "generation_config.json")) as f:
+                    gen_cfg = json.load(f)
+                task.compile(sampler=self.converter.convert_sampler_config(gen_cfg))
         return task
 
     def load_tokenizer(self, cls, config_name="tokenizer.json", **kwargs):

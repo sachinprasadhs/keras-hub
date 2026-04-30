@@ -554,16 +554,128 @@ class Gemma4CausalLM(CausalLM):
                 cache,
             )
 
-        token_ids = self.sampler(
-            next=next,
-            prompt=token_ids,
-            cache=cache,
-            index=index,
-            mask=padding_mask,
-            stop_token_ids=stop_token_ids,
-            hidden_states=hidden_states,
-            model=self,
-        )
+        sampler_kwargs = {
+            "next": next,
+            "prompt": token_ids,
+            "cache": cache,
+            "index": index,
+            "mask": padding_mask,
+            "stop_token_ids": stop_token_ids,
+            "hidden_states": hidden_states,
+            "model": self,
+        }
+
+        # Speculative decoding: build draft_next and verify_next when an
+        # assistant model is attached via generate().
+        _assistant = getattr(self, "_assistant_model", None)
+        if _assistant is not None:
+            # The draft model borrows the target's KV cache at each step
+            # (MTP / KV-sharing).  It does not maintain its own cache.
+            # `draft_cache` carries `last_hidden_state` (shape
+            # (batch, 1, backbone_hidden_size)) between draft steps.
+            # We initialise it from the target model's last prompt hidden state.
+            batch_size_ = ops.shape(token_ids)[0]
+            start_pos = ops.cast(index - 1, "int32")
+            # Slice the last prompt position hidden state as the seed.
+            # hidden_states is (batch, seq, target_hidden_dim).
+            init_last_hidden = ops.slice(
+                hidden_states, [0, start_pos, 0],
+                [batch_size_, 1, self.backbone.hidden_dim],
+            )
+
+            def draft_next(prompt, draft_state, index):
+                """One draft step: advance the assistant by one token.
+
+                `draft_state` is a tuple `(last_hidden, cur_target_cache)`:
+                  - `last_hidden`: target-dimension hidden state from the
+                    previous step (initially the target model's last prompt
+                    hidden state).
+                  - `cur_target_cache`: the target model's KV cache as of the
+                    last verification step.  Carrying it here (rather than
+                    closing over the initial `cache`) ensures the draft model
+                    always sees the freshly written K/V entries after each
+                    verify phase.
+                This mirrors the HF MTP loop:
+                  last_hidden_state = backbone_outputs.hidden_states[-1][:, -1:]
+                  for _ in range(max_new_tokens):
+                      last_token_embedding = target.get_input_embeddings()(last_token_id)
+                      inputs_embeds = cat([last_token_embedding, last_hidden_state], dim=-1)
+                      out = assistant(inputs_embeds, past_kv=target_cache)
+                      last_token_id = out.logits.argmax()
+                      last_hidden_state = out.hidden_states
+                """
+                last_hidden, cur_target_cache = draft_state
+                # Extract the last token id at position `index - 1`.
+                batch = ops.shape(prompt)[0]
+                last_token_id = ops.slice(
+                    prompt, [0, ops.cast(index - 1, "int32")], [batch, 1]
+                )
+                # Look up the TARGET model's embedding (self.backbone is the
+                # target backbone here, in scope via closure). This matches HF
+                # which calls target_model.get_input_embeddings()(last_token_id).
+                last_token_embedding = self.backbone.token_embedding(last_token_id)
+                # `last_hidden` is (batch, 1, backbone_hidden_size).
+                # `cur_target_cache` is the up-to-date target KV cache.
+                logits, next_hidden = _assistant.call_with_cache(
+                    last_token_embedding=last_token_embedding,
+                    last_hidden_state=last_hidden,
+                    target_cache=cur_target_cache,
+                    cache_update_index=index - 1,
+                )
+                # logits: (batch, 1, vocab) → squeeze to (batch, vocab)
+                # Pass next_hidden and the unchanged target cache forward.
+                return (
+                    ops.squeeze(logits, axis=1),
+                    next_hidden,
+                    (next_hidden, cur_target_cache),
+                )
+
+            def verify_next(prompt, target_cache, index, k):
+                """Verify K+1 positions with the target model in parallel.
+
+                ``safe_start`` is clamped so that the k+1-token window never
+                overflows the buffer, preventing out-of-bounds in the
+                sliding-window mask and key-cache update slices when generation
+                nears the end of the pre-allocated sequence.
+                """
+                batch = ops.shape(prompt)[0]
+                max_len = ops.shape(prompt)[1]
+                safe_start = ops.maximum(
+                    ops.cast(0, "int32"),
+                    ops.minimum(
+                        ops.cast(index - 1, "int32"),
+                        ops.cast(max_len - k - 1, "int32"),
+                    ),
+                )
+                prompt_slice = ops.slice(prompt, [0, safe_start], [batch, k + 1])
+                # cache_update_mask: True = write this slot; False = keep existing.
+                cache_update_slice = ops.slice(
+                    ~padding_mask, [0, safe_start], [batch, k + 1]
+                )
+                logits, _, updated_cache = self.call_with_cache(
+                    token_ids=prompt_slice,
+                    cache=target_cache,
+                    cache_update_index=safe_start,
+                    img_embeddings=img_embeddings,
+                    vision_mask=vision_mask,
+                    padding_mask=None,  # causal mask only; no padding filter
+                    vision_indices=vision_indices,
+                    audio_embeddings=audio_embeddings,
+                    audio_indices=audio_indices,
+                    audio_mask=audio_mask,
+                    cache_update_mask=cache_update_slice,
+                )
+                return logits, updated_cache
+
+            sampler_kwargs["draft_next"] = draft_next
+            # draft_cache is a tuple (last_hidden, target_cache).
+            # The target_cache component is updated by the speculative sampler
+            # after each verify phase so that draft_next always conditions on
+            # the freshest KV entries (see speculative_sampler.py).
+            sampler_kwargs["draft_cache"] = (init_last_hidden, cache)
+            sampler_kwargs["verify_next"] = verify_next
+
+        token_ids = self.sampler(**sampler_kwargs)
 
         # Compute an updated padding mask.
         if stop_token_ids is not None:
@@ -588,6 +700,7 @@ class Gemma4CausalLM(CausalLM):
         max_length=None,
         stop_token_ids="auto",
         strip_prompt=False,
+        assistant_model=None,
     ):
         # If `auto`, add `<turn|>` as a stop token too.
         if self.preprocessor is None and stop_token_ids == "auto":
@@ -605,9 +718,53 @@ class Gemma4CausalLM(CausalLM):
                 self.preprocessor.tokenizer.token_to_id("<turn|>"),
             ]
 
-        return super().generate(
-            inputs,
-            max_length=max_length,
-            stop_token_ids=stop_token_ids,
-            strip_prompt=strip_prompt,
-        )
+        # Thread the assistant model into generate_step via a temporary
+        # attribute that is only set for the duration of this call. We deliberately avoid caching the compiled
+        # generate function when assistant_model changes so the inner closures
+        # are always fresh.
+        prev_assistant = getattr(self, "_assistant_model", None)
+        self._assistant_model = assistant_model
+
+        if assistant_model is not None:
+            from keras_hub.src.samplers.speculative_sampler import (
+                SpeculativeSampler,
+            )
+
+            prev_sampler = self.sampler
+            # Use the assistant's compiled sampler as the base_sampler for
+            # the SpeculativeSampler acceptance step.
+            from keras_hub.src.samplers.greedy_sampler import GreedySampler
+
+            assistant_sampler = getattr(assistant_model, "sampler", None)
+            base_sampler = (
+                assistant_sampler
+                if assistant_sampler is not None
+                and not isinstance(assistant_sampler, GreedySampler)
+                and assistant_sampler != "greedy"
+                else None
+            )
+            self.sampler = SpeculativeSampler(
+                num_speculative_tokens=5, base_sampler=base_sampler
+            )
+            # Invalidate any previously compiled generate function so the new
+            # sampler and draft closures take effect.
+            self.generate_function = None
+        else:
+            prev_sampler = None
+
+        try:
+            outputs = super().generate(
+                inputs,
+                max_length=max_length,
+                stop_token_ids=stop_token_ids,
+                strip_prompt=strip_prompt,
+            )
+        finally:
+            self._assistant_model = prev_assistant
+            if prev_sampler is not None:
+                self.sampler = prev_sampler
+                # Invalidate again so subsequent normal calls recompile with
+                # the original sampler.
+                self.generate_function = None
+
+        return outputs
