@@ -80,9 +80,9 @@ def build_assistant(hf_config):
         backbone=backbone,
         backbone_hidden_size=int(hf_config["backbone_hidden_size"]),
         num_centroids=int(hf_config["num_centroids"]),
-        centroid_intermediate_top_k=int(hf_config["centroid_intermediate_top_k"]),
-        preprocessor=None,
-        dtype="float32",
+        centroid_intermediate_top_k=int(
+            hf_config["centroid_intermediate_top_k"]
+        ),
     )
     assistant.pre_projection.build(
         (None, None, 2 * int(hf_config["backbone_hidden_size"]))

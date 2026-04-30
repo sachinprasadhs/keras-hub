@@ -34,7 +34,11 @@ class Gemma4AssistantCausalLM(CausalLM):
             embedding head. Defaults to `2048`.
         centroid_intermediate_top_k: int. Number of active centroids per
             forward pass. Defaults to `32`.
-        preprocessor: Must be `None`. Token ids are passed directly.
+        use_ordered_embeddings: bool. Whether to use sparse centroid-based
+            embedding routing for logits. Larger variants (e.g. 26B) disable
+            this for a standard output head. Defaults to `True`.
+        sampler: A `keras_hub.samplers.Sampler` instance or string. The
+            sampling strategy. Defaults to `"greedy"`.
 
     Examples:
     ```python
@@ -62,20 +66,24 @@ class Gemma4AssistantCausalLM(CausalLM):
         backbone_hidden_size=1536,
         num_centroids=2048,
         centroid_intermediate_top_k=32,
-        preprocessor=None,
+        use_ordered_embeddings=True,
+        sampler="greedy",
         **kwargs,
     ):
         self.backbone_hidden_size = backbone_hidden_size
         self.num_centroids = num_centroids
         self.centroid_intermediate_top_k = centroid_intermediate_top_k
-        # Set backbone and preprocessor before super().__init__() so the
-        # parent class finds self._backbone immediately (see Task.backbone).
+        self.use_ordered_embeddings = use_ordered_embeddings
+        # Set backbone before super().__init__() so the
+        # parent class finds self._backbone immediately.
         self.backbone = backbone
-        self.preprocessor = preprocessor
 
         hidden_size = backbone.hidden_dim
         vocabulary_size = backbone.token_embedding.input_dim
         self._vocab_size_per_centroid = vocabulary_size // num_centroids
+
+        for layer in self.backbone.transformer_layers:
+            layer.attention.is_kv_shared_layer = True
 
         # Build the functional model (used for weight loading / summary).
         inputs = backbone.input
@@ -85,16 +93,10 @@ class Gemma4AssistantCausalLM(CausalLM):
         super().__init__(
             inputs=inputs,
             outputs=outputs,
+            sampler=sampler,
+            backbone=backbone,
             **kwargs,
         )
-
-        # All assistant transformer layers borrow K/V from the target model's
-        # cache (external KV sharing).  The backbone's num_kv_shared_layers
-        # mechanism only handles intra-backbone sharing, so we explicitly mark
-        # every layer as is_kv_shared_layer=True here so that the attention
-        # module uses the `shared_kv` argument passed in call_with_cache.
-        for layer in self.backbone.transformer_layers:
-            layer.attention.is_kv_shared_layer = True
 
         # Non-graph projection layers created AFTER super().__init__() so
         # Keras registers them as tracked sub-layers of this model.  They are
@@ -109,6 +111,7 @@ class Gemma4AssistantCausalLM(CausalLM):
             dtype=backbone.dtype_policy,
             name="pre_projection",
         )
+        self.pre_projection.build((None, 1, 2 * backbone_hidden_size))
 
         # post_projection: hidden → backbone_hidden_size.
         self.post_projection = layers.Dense(
@@ -117,26 +120,25 @@ class Gemma4AssistantCausalLM(CausalLM):
             dtype=backbone.dtype_policy,
             name="post_projection",
         )
+        self.post_projection.build((None, 1, hidden_size))
+        self.centroids = None
+        self.token_ordering = None
+        if use_ordered_embeddings:
+            self.centroids = layers.Dense(
+                num_centroids,
+                use_bias=False,
+                dtype=backbone.dtype_policy,
+                name="centroids",
+            )
+            self.centroids.build((None, 1, hidden_size))
 
-        # Centroid routing layer for ordered embedding logit head.
-        # Maps hidden_size → num_centroids.
-        self.centroids = layers.Dense(
-            num_centroids,
-            use_bias=False,
-            dtype=backbone.dtype_policy,
-            name="centroids",
-        )
-
-        # Non-trainable integer buffer: maps each vocabulary token to its
-        # centroid cluster position.  Shape (vocabulary_size,).
-        # Initialised to zeros; must be loaded from the checkpoint.
-        self.token_ordering = self.add_weight(
-            name="token_ordering",
-            shape=(vocabulary_size,),
-            dtype="int32",
-            trainable=False,
-            initializer="zeros",
-        )
+            self.token_ordering = self.add_weight(
+                name="token_ordering",
+                shape=(vocabulary_size,),
+                dtype="int32",
+                trainable=False,
+                initializer="zeros",
+            )
 
     def _apply_centroid_logits(self, hidden_states):
         """Compute sparse logits via centroid-based vocabulary masking.
@@ -203,17 +205,22 @@ class Gemma4AssistantCausalLM(CausalLM):
         scatter_idx = ops.reshape(selected_canonical, (flat_hs, n_tokens))
         flat_logits = ops.reshape(selected_logits, (flat_hs, n_tokens))
 
-        # XLA-compatible scatter via one-hot weighted sum.
-        one_hot = ops.one_hot(
-            ops.reshape(scatter_idx, (-1,)), vocab_size
-        )  # (flat_hs * n_tokens, vocab_size)
-        one_hot = ops.reshape(one_hot, (flat_hs, n_tokens, vocab_size))
-        scattered = ops.einsum("bkv,bk->bv", one_hot, flat_logits)
-
-        touched = ops.cast(
-            ops.sum(one_hot, axis=1) > 0, dtype=hidden_states.dtype
+        # Memory-efficient sparse scatter to avoid full OOM one-hot allocation.
+        row_idx = ops.expand_dims(ops.arange(flat_hs, dtype="int32"), axis=-1)
+        row_idx = ops.broadcast_to(row_idx, (flat_hs, n_tokens))
+        
+        # Form sparse coordinates: (flat_hs * n_tokens, 2)
+        coords = ops.stack(
+            [
+                ops.reshape(row_idx, (-1,)),
+                ops.reshape(scatter_idx, (-1,))
+            ],
+            axis=1,
         )
-        output = ops.where(ops.cast(touched, "bool"), scattered, output)
+        updates = ops.reshape(flat_logits, (-1,))
+        
+        # Perform true scatter update over full negative inf base tensor
+        output = ops.scatter_update(output, coords, updates)
         return ops.reshape(output, (batch, seq, vocab_size))
 
     def call_with_cache(
@@ -300,7 +307,11 @@ class Gemma4AssistantCausalLM(CausalLM):
             )
 
         hidden_states = self.backbone.layer_norm(x)
-        logits = self._apply_centroid_logits(hidden_states)
+        # Conditionally utilize sparse centroid projection
+        if self.use_ordered_embeddings:
+            logits = self._apply_centroid_logits(hidden_states)
+        else:
+            logits = self.backbone.token_embedding(hidden_states, reverse=True)
         next_hidden_state = self.post_projection(hidden_states)
 
         return logits, next_hidden_state
@@ -335,6 +346,7 @@ class Gemma4AssistantCausalLM(CausalLM):
                 "centroid_intermediate_top_k": (
                     self.centroid_intermediate_top_k
                 ),
+                "use_ordered_embeddings": self.use_ordered_embeddings,
             }
         )
         return config

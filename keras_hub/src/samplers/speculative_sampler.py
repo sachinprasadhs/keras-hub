@@ -8,11 +8,15 @@ from keras_hub.src.utils.tensor_utils import any_equal
 
 @keras_hub_export("keras_hub.samplers.SpeculativeSampler")
 class SpeculativeSampler(Sampler):
-    """Speculative decoding sampler (Leviathan et al., 2022).
+    """Speculative decoding sampler.
 
     Accelerates autoregressive inference by running a small draft model to
     propose K candidate tokens, then verifying all K+1 positions with the
     large target model in a single parallel forward pass.
+
+    References:
+    - [Fast Inference from Transformers via Speculative Decoding]
+        (https://arxiv.org/abs/2211.17192) (Leviathan et al., 2022)
 
     The algorithm follows three phases per outer iteration:
       1. **Draft phase**: The draft model auto-regressively generates K tokens.
@@ -133,8 +137,16 @@ class SpeculativeSampler(Sampler):
                 logits, _, current_draft_cache = draft_next(
                     current_prompt, current_draft_cache, safe_idx
                 )
-                # (batch, vocab)
-                probs = self.compute_probabilities(logits)
+                # (batch, vocab) — use compute_probabilities so temperature
+                # is applied consistently with the base sampler, and q_probs
+                # reflects the distribution actually used for sampling.
+                if self.base_sampler is not None:
+                    dt = getattr(self.base_sampler, "temperature", 1.0)
+                    probs = ops.softmax(
+                        ops.cast(logits, "float32") / ops.cast(dt, "float32")
+                    )
+                else:
+                    probs = self.compute_probabilities(logits)
 
                 if self.base_sampler is not None:
                     # Sample according to the base sampler's distribution.

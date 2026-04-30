@@ -2,7 +2,9 @@ import numpy as np
 from absl.testing import parameterized
 from keras import ops
 
-from keras_hub.src.models.gemma4.gemma4_assistant import Gemma4AssistantCausalLM
+from keras_hub.src.models.gemma4.gemma4_assistant_causal_lm import (
+    Gemma4AssistantCausalLM,
+)
 from keras_hub.src.models.gemma4.gemma4_backbone import Gemma4Backbone
 from keras_hub.src.models.gemma4.gemma4_causal_lm import Gemma4CausalLM
 from keras_hub.src.tests.test_case import TestCase

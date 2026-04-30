@@ -410,7 +410,7 @@ class Gemma4CausalLM(CausalLM):
         )
         return config
 
-    def generate_step(self, inputs, stop_token_ids=[106]):
+    def generate_step(self, inputs, stop_token_ids=None):
         """A compilable generation function for a single batch of inputs.
 
         This function represents the inner, XLA-compilable, generation function
@@ -554,16 +554,9 @@ class Gemma4CausalLM(CausalLM):
                 cache,
             )
 
-        sampler_kwargs = {
-            "next": next,
-            "prompt": token_ids,
-            "cache": cache,
-            "index": index,
-            "mask": padding_mask,
-            "stop_token_ids": stop_token_ids,
-            "hidden_states": hidden_states,
-            "model": self,
-        }
+        draft_next = None
+        draft_cache = None
+        verify_next = None
 
         # Speculative decoding: build draft_next and verify_next when an
         # assistant model is attached via generate().
@@ -588,21 +581,8 @@ class Gemma4CausalLM(CausalLM):
 
                 `draft_state` is a tuple `(last_hidden, cur_target_cache)`:
                   - `last_hidden`: target-dimension hidden state from the
-                    previous step (initially the target model's last prompt
-                    hidden state).
-                  - `cur_target_cache`: the target model's KV cache as of the
-                    last verification step.  Carrying it here (rather than
-                    closing over the initial `cache`) ensures the draft model
-                    always sees the freshly written K/V entries after each
-                    verify phase.
-                This mirrors the HF MTP loop:
-                  last_hidden_state = backbone_outputs.hidden_states[-1][:, -1:]
-                  for _ in range(max_new_tokens):
-                      last_token_embedding = target.get_input_embeddings()(last_token_id)
-                      inputs_embeds = cat([last_token_embedding, last_hidden_state], dim=-1)
-                      out = assistant(inputs_embeds, past_kv=target_cache)
-                      last_token_id = out.logits.argmax()
-                      last_hidden_state = out.hidden_states
+                    previous step.
+                  - `cur_target_cache`: the target model's KV cache.
                 """
                 last_hidden, cur_target_cache = draft_state
                 # Extract the last token id at position `index - 1`.
@@ -611,9 +591,10 @@ class Gemma4CausalLM(CausalLM):
                     prompt, [0, ops.cast(index - 1, "int32")], [batch, 1]
                 )
                 # Look up the TARGET model's embedding (self.backbone is the
-                # target backbone here, in scope via closure). This matches HF
-                # which calls target_model.get_input_embeddings()(last_token_id).
-                last_token_embedding = self.backbone.token_embedding(last_token_id)
+                # target backbone here, in scope via closure).
+                last_token_embedding = self.backbone.token_embedding(
+                    last_token_id
+                )
                 # `last_hidden` is (batch, 1, backbone_hidden_size).
                 # `cur_target_cache` is the up-to-date target KV cache.
                 logits, next_hidden = _assistant.call_with_cache(
@@ -647,8 +628,10 @@ class Gemma4CausalLM(CausalLM):
                         ops.cast(max_len - k - 1, "int32"),
                     ),
                 )
-                prompt_slice = ops.slice(prompt, [0, safe_start], [batch, k + 1])
-                # cache_update_mask: True = write this slot; False = keep existing.
+                prompt_slice = ops.slice(
+                    prompt, [0, safe_start], [batch, k + 1]
+                )
+                # cache_update_mask: True=write; False=keep existing.
                 cache_update_slice = ops.slice(
                     ~padding_mask, [0, safe_start], [batch, k + 1]
                 )
@@ -667,15 +650,21 @@ class Gemma4CausalLM(CausalLM):
                 )
                 return logits, updated_cache
 
-            sampler_kwargs["draft_next"] = draft_next
-            # draft_cache is a tuple (last_hidden, target_cache).
-            # The target_cache component is updated by the speculative sampler
-            # after each verify phase so that draft_next always conditions on
-            # the freshest KV entries (see speculative_sampler.py).
-            sampler_kwargs["draft_cache"] = (init_last_hidden, cache)
-            sampler_kwargs["verify_next"] = verify_next
+            draft_cache = (init_last_hidden, cache)
 
-        token_ids = self.sampler(**sampler_kwargs)
+        token_ids = self.sampler(
+            next=next,
+            prompt=token_ids,
+            cache=cache,
+            index=index,
+            mask=padding_mask,
+            stop_token_ids=stop_token_ids,
+            hidden_states=hidden_states,
+            model=self,
+            draft_next=draft_next,
+            draft_cache=draft_cache,
+            verify_next=verify_next,
+        )
 
         # Compute an updated padding mask.
         if stop_token_ids is not None:
@@ -718,22 +707,11 @@ class Gemma4CausalLM(CausalLM):
                 self.preprocessor.tokenizer.token_to_id("<turn|>"),
             ]
 
-        # Thread the assistant model into generate_step via a temporary
-        # attribute that is only set for the duration of this call. We deliberately avoid caching the compiled
-        # generate function when assistant_model changes so the inner closures
-        # are always fresh.
-        prev_assistant = getattr(self, "_assistant_model", None)
-        self._assistant_model = assistant_model
-
         if assistant_model is not None:
+            from keras_hub.src.samplers.greedy_sampler import GreedySampler
             from keras_hub.src.samplers.speculative_sampler import (
                 SpeculativeSampler,
             )
-
-            prev_sampler = self.sampler
-            # Use the assistant's compiled sampler as the base_sampler for
-            # the SpeculativeSampler acceptance step.
-            from keras_hub.src.samplers.greedy_sampler import GreedySampler
 
             assistant_sampler = getattr(assistant_model, "sampler", None)
             base_sampler = (
@@ -743,28 +721,23 @@ class Gemma4CausalLM(CausalLM):
                 and assistant_sampler != "greedy"
                 else None
             )
+            original_sampler = self.sampler
+            self._assistant_model = assistant_model
             self.sampler = SpeculativeSampler(
                 num_speculative_tokens=5, base_sampler=base_sampler
             )
-            # Invalidate any previously compiled generate function so the new
-            # sampler and draft closures take effect.
             self.generate_function = None
-        else:
-            prev_sampler = None
 
-        try:
-            outputs = super().generate(
-                inputs,
-                max_length=max_length,
-                stop_token_ids=stop_token_ids,
-                strip_prompt=strip_prompt,
-            )
-        finally:
-            self._assistant_model = prev_assistant
-            if prev_sampler is not None:
-                self.sampler = prev_sampler
-                # Invalidate again so subsequent normal calls recompile with
-                # the original sampler.
-                self.generate_function = None
+        outputs = super().generate(
+            inputs,
+            max_length=max_length,
+            stop_token_ids=stop_token_ids,
+            strip_prompt=strip_prompt,
+        )
+
+        if assistant_model is not None:
+            self._assistant_model = None
+            self.sampler = original_sampler
+            self.generate_function = None
 
         return outputs

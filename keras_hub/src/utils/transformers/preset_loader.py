@@ -132,10 +132,11 @@ class TransformersPresetLoader(PresetLoader):
 
     def load_task(self, cls, load_weights, load_task_weights, **kwargs):
         architecture = self.config["architectures"][0]
-        if (
-            not load_task_weights
-            or not issubclass(cls, ImageClassifier)
-            or architecture == "ViTModel"
+        is_classifier = issubclass(cls, ImageClassifier)
+        is_assistant = architecture == "Gemma4AssistantForCausalLM"
+        
+        if not load_task_weights or (
+            not is_classifier and not is_assistant and architecture != "ViTModel"
         ):
             return super().load_task(
                 cls, load_weights, load_task_weights, **kwargs

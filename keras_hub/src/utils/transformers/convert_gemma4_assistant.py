@@ -1,11 +1,19 @@
 import numpy as np
-from keras_hub.src.models.gemma4.gemma4_assistant import Gemma4AssistantCausalLM
+from keras_hub.src.models.gemma4.gemma4_assistant_causal_lm import (
+    Gemma4AssistantCausalLM,
+)
 from keras_hub.src.utils.preset_utils import load_json
 from keras_hub.src.utils.transformers.convert_gemma4 import (
     _convert_decoder_block,
 )
 from keras_hub.src.samplers.top_k_sampler import TopKSampler
 from keras_hub.src.samplers.top_p_sampler import TopPSampler
+from keras_hub.src.models.gemma4.gemma4_backbone import Gemma4Backbone
+from keras_hub.src.utils.transformers.convert_gemma4 import (
+    convert_backbone_config as target_convert_config,
+)
+
+backbone_cls = Gemma4Backbone
 
 
 def convert_backbone_config(transformers_config):
@@ -15,11 +23,7 @@ def convert_backbone_config(transformers_config):
     # This will be similar to convert_gemma4.py but simplified for the
     # 4-layer model and adding assistant-specific fields if needed.
     # For now, we can rely on the existing convert_backbone_config or
-    # implement a simplified version here.
-    from keras_hub.src.utils.transformers.convert_gemma4 import (
-        convert_backbone_config as target_convert_config,
-    )
-
+    # implementation of a simplified version here.
     config = target_convert_config(transformers_config)
     return config
 
@@ -34,7 +38,9 @@ def convert_sampler_config(generation_config):
       temperature  → passed to whichever sampler is chosen
     """
     do_sample = generation_config.get("do_sample", False)
-    if not do_sample and ("top_k" in generation_config or "top_p" in generation_config):
+    has_top_k = "top_k" in generation_config
+    has_top_p = "top_p" in generation_config
+    if not do_sample and (has_top_k or has_top_p):
         do_sample = True
 
     if do_sample:
@@ -57,66 +63,60 @@ def convert_sampler_config(generation_config):
     return "greedy"
 
 
-def convert_weights(model, loader, transformers_config):
-    """Port Gemma4Assistant weights from HF to Keras Hub."""
+def convert_weights(backbone, loader, transformers_config):
+    """Port Gemma4Assistant Backbone weights (inner model) from HF."""
 
-    # 1. Map top-level assistant layers
-    # Build layers before accessing weights
-    model.pre_projection.build((None, 2 * model.backbone_hidden_size))
-    if hasattr(model, "centroids") and model.centroids is not None:
-        model.centroids.build((None, model.backbone.hidden_dim))
+    def hf_key(suffix):
+        return f"model.{suffix}"
 
-    # In wheel: self.pre_projection = nn.Linear(2 * backbone_hidden_size,
-    # hidden_size)
-    # In wheel: self.post_projection = nn.Linear(hidden_size,
-    # backbone_hidden_size)
+    for i in range(backbone.num_layers):
+        decoder_layer = backbone.get_layer(f"decoder_block_{i}")
+        # Assistant weights have NO independent key/value tensors in the file.
+        # Force toggle the flag on temporarily during this specific port phase
+        # to bypass redundant safe-tensor load checks without altering the backbone.
+        decoder_layer.attention.is_kv_shared_layer = True
+        _convert_decoder_block(decoder_layer, i, loader, hf_key)
+
+    loader.port_weight(
+        keras_variable=backbone.get_layer("token_embedding").embeddings,
+        hf_weight_key=hf_key("embed_tokens.weight"),
+    )
+
+    loader.port_weight(
+        keras_variable=backbone.get_layer("final_normalization").scale,
+        hf_weight_key=hf_key("norm.weight"),
+    )
+
+
+def convert_head(model, loader, transformers_config):
+    """Port the dedicated Assistant top-level projection layers."""
+    # pre_projection
     loader.port_weight(
         keras_variable=model.pre_projection.kernel,
         hf_weight_key="pre_projection.weight",
         hook_fn=lambda x, _: np.transpose(x),
     )
+    
+    # post_projection
     loader.port_weight(
         keras_variable=model.post_projection.kernel,
         hf_weight_key="post_projection.weight",
         hook_fn=lambda x, _: np.transpose(x),
     )
 
-    if hasattr(model, "centroids") and model.centroids is not None:
+    # centroids
+    if getattr(model, "centroids", None) is not None:
         loader.port_weight(
             keras_variable=model.centroids.kernel,
             hf_weight_key="masked_embedding.centroids.weight",
             hook_fn=lambda x, _: np.transpose(x),
         )
 
-    if hasattr(model, "token_ordering") and model.token_ordering is not None:
+    # token_ordering
+    if getattr(model, "token_ordering", None) is not None:
         loader.port_weight(
             keras_variable=model.token_ordering,
             hf_weight_key="masked_embedding.token_ordering",
             hook_fn=lambda x, _: x.astype(np.int32),
         )
 
-    # 2. Map the inner model weights (the 4 transformer layers)
-    # In wheel file, the inner model is created via AutoModel.from_config
-    # We assume the weights are under "model." prefix in the safetensors.
-    def hf_key(suffix):
-        return f"model.{suffix}"
-
-    for i in range(model.backbone.num_layers):
-        decoder_layer = model.backbone.get_layer(f"decoder_block_{i}")
-        # We reuse the decoder block converter from convert_gemma4.py
-        _convert_decoder_block(decoder_layer, i, loader, hf_key)
-
-    # 3. Port token embedding if not tied, or if handled separately
-    # Gemma4 typically ties weights, but let's ensure we follow the pattern.
-    loader.port_weight(
-        keras_variable=model.backbone.get_layer("token_embedding").embeddings,
-        hf_weight_key=hf_key("embed_tokens.weight"),
-    )
-
-    # 4. Port final normalization
-    loader.port_weight(
-        keras_variable=model.backbone.get_layer("final_normalization").scale,
-        hf_weight_key=hf_key("norm.weight"),
-    )
-
-    return model
