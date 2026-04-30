@@ -63,13 +63,14 @@ class Gemma4AssistantCausalLM(CausalLM):
     def __init__(
         self,
         backbone,
-        backbone_hidden_size=1536,
-        num_centroids=2048,
-        centroid_intermediate_top_k=32,
-        use_ordered_embeddings=True,
+        backbone_hidden_size,
+        num_centroids,
+        centroid_intermediate_top_k,
+        use_ordered_embeddings,
         sampler="greedy",
         **kwargs,
     ):
+
         self.backbone_hidden_size = backbone_hidden_size
         self.num_centroids = num_centroids
         self.centroid_intermediate_top_k = centroid_intermediate_top_k
@@ -208,17 +209,14 @@ class Gemma4AssistantCausalLM(CausalLM):
         # Memory-efficient sparse scatter to avoid full OOM one-hot allocation.
         row_idx = ops.expand_dims(ops.arange(flat_hs, dtype="int32"), axis=-1)
         row_idx = ops.broadcast_to(row_idx, (flat_hs, n_tokens))
-        
+
         # Form sparse coordinates: (flat_hs * n_tokens, 2)
         coords = ops.stack(
-            [
-                ops.reshape(row_idx, (-1,)),
-                ops.reshape(scatter_idx, (-1,))
-            ],
+            [ops.reshape(row_idx, (-1,)), ops.reshape(scatter_idx, (-1,))],
             axis=1,
         )
         updates = ops.reshape(flat_logits, (-1,))
-        
+
         # Perform true scatter update over full negative inf base tensor
         output = ops.scatter_update(output, coords, updates)
         return ops.reshape(output, (batch, seq, vocab_size))
@@ -236,7 +234,8 @@ class Gemma4AssistantCausalLM(CausalLM):
         Drafts one candidate token given the target model's state.
 
         Args:
-            last_token_embedding: float tensor `(batch, 1, backbone_hidden_size)`.
+            last_token_embedding: float tensor
+                `(batch, 1, backbone_hidden_size)`.
                 The target model's embedding of the last accepted token, i.e.
                 ``target_backbone.token_embedding(last_token_id)``.
                 This matches HF's candidate generator which calls
@@ -260,8 +259,10 @@ class Gemma4AssistantCausalLM(CausalLM):
         # (batch, 1, 2 * backbone_hidden_size).
         # `last_token_embedding` comes from the TARGET model's embedding table
         # (backbone_hidden_size-dim), matching HF's candidate generator:
-        #   last_token_embedding = target_model.get_input_embeddings()(last_token_id)
-        #   inputs_embeds = cat([last_token_embedding, last_hidden_state], dim=-1)
+        #   last_token_embedding =
+        #       target_model.get_input_embeddings()(last_token_id)
+        #   inputs_embeds = cat([last_token_embedding, last_hidden_state],
+        #       dim=-1)
         inputs_embeds = ops.concatenate(
             [last_token_embedding, last_hidden_state], axis=-1
         )
@@ -280,18 +281,12 @@ class Gemma4AssistantCausalLM(CausalLM):
 
         layer_types = self.backbone.layer_types or []
         shared_kv_map = {
-            i: (
-                shared_kv_global
-                if lt == "full_attention"
-                else shared_kv_local
-            )
+            i: (shared_kv_global if lt == "full_attention" else shared_kv_local)
             for i, lt in enumerate(layer_types)
         }
 
         # Run through all 4 KV-shared transformer layers (no cache write).
-        for i, transformer_layer in enumerate(
-            self.backbone.transformer_layers
-        ):
+        for i, transformer_layer in enumerate(self.backbone.transformer_layers):
             layer_shared_kv = shared_kv_map.get(i)
             x, _ = transformer_layer(
                 x,

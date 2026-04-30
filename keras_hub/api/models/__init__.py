@@ -334,14 +334,14 @@ from keras_hub.src.models.gemma3n.gemma3n_causal_lm_preprocessor import (
 from keras_hub.src.models.gemma3n.gemma3n_tokenizer import (
     Gemma3nTokenizer as Gemma3nTokenizer,
 )
+from keras_hub.src.models.gemma4.gemma4_assistant_causal_lm import (
+    Gemma4AssistantCausalLM as Gemma4AssistantCausalLM,
+)
 from keras_hub.src.models.gemma4.gemma4_audio_encoder import (
     Gemma4AudioEncoder as Gemma4AudioEncoder,
 )
 from keras_hub.src.models.gemma4.gemma4_backbone import (
     Gemma4Backbone as Gemma4Backbone,
-)
-from keras_hub.src.models.gemma4.gemma4_assistant_causal_lm import (
-    Gemma4AssistantCausalLM as Gemma4AssistantCausalLM,
 )
 from keras_hub.src.models.gemma4.gemma4_causal_lm import (
     Gemma4CausalLM as Gemma4CausalLM,

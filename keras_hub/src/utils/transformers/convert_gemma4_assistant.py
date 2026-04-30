@@ -1,14 +1,11 @@
 import numpy as np
-from keras_hub.src.models.gemma4.gemma4_assistant_causal_lm import (
-    Gemma4AssistantCausalLM,
-)
-from keras_hub.src.utils.preset_utils import load_json
+
+from keras_hub.src.models.gemma4.gemma4_backbone import Gemma4Backbone
+from keras_hub.src.samplers.top_k_sampler import TopKSampler
+from keras_hub.src.samplers.top_p_sampler import TopPSampler
 from keras_hub.src.utils.transformers.convert_gemma4 import (
     _convert_decoder_block,
 )
-from keras_hub.src.samplers.top_k_sampler import TopKSampler
-from keras_hub.src.samplers.top_p_sampler import TopPSampler
-from keras_hub.src.models.gemma4.gemma4_backbone import Gemma4Backbone
 from keras_hub.src.utils.transformers.convert_gemma4 import (
     convert_backbone_config as target_convert_config,
 )
@@ -26,6 +23,18 @@ def convert_backbone_config(transformers_config):
     # implementation of a simplified version here.
     config = target_convert_config(transformers_config)
     return config
+
+
+def convert_task_config(transformers_config):
+    """Map Transformers config to Gemma4AssistantCausalLM kwargs."""
+    return {
+        "centroid_intermediate_top_k": transformers_config[
+            "centroid_intermediate_top_k"
+        ],
+        "use_ordered_embeddings": transformers_config["use_ordered_embeddings"],
+        "backbone_hidden_size": transformers_config["backbone_hidden_size"],
+        "num_centroids": transformers_config["num_centroids"],
+    }
 
 
 def convert_sampler_config(generation_config):
@@ -73,7 +82,8 @@ def convert_weights(backbone, loader, transformers_config):
         decoder_layer = backbone.get_layer(f"decoder_block_{i}")
         # Assistant weights have NO independent key/value tensors in the file.
         # Force toggle the flag on temporarily during this specific port phase
-        # to bypass redundant safe-tensor load checks without altering the backbone.
+        # to bypass redundant safe-tensor load checks without altering the
+        # backbone.
         decoder_layer.attention.is_kv_shared_layer = True
         _convert_decoder_block(decoder_layer, i, loader, hf_key)
 
@@ -96,7 +106,7 @@ def convert_head(model, loader, transformers_config):
         hf_weight_key="pre_projection.weight",
         hook_fn=lambda x, _: np.transpose(x),
     )
-    
+
     # post_projection
     loader.port_weight(
         keras_variable=model.post_projection.kernel,
@@ -119,4 +129,3 @@ def convert_head(model, loader, transformers_config):
             hf_weight_key="masked_embedding.token_ordering",
             hook_fn=lambda x, _: x.astype(np.int32),
         )
-

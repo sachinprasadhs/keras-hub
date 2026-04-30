@@ -23,7 +23,6 @@ from transformers import AutoModelForCausalLM
 from transformers import AutoModelForMultimodalLM
 from transformers import AutoProcessor
 from transformers import AutoTokenizer
-from huggingface_hub import snapshot_download
 
 import keras_hub
 
@@ -734,26 +733,24 @@ def _precompute_all_hf_outputs(
     if hf_target_model is not None:
         print("-> Assistant Mode: Extracting states natively from HF Target...")
         hf_inputs = hf_tokenizer(PROMPT_TEXT, return_tensors="pt")
-        
+
         with torch.no_grad():
             # 1. Native HF Target forward pass
-            target_out = hf_target_model(
-                **hf_inputs, output_hidden_states=True
-            )
+            target_out = hf_target_model(**hf_inputs, output_hidden_states=True)
             # Extract last hidden state and last embedding natively
             hf_last_hs = target_out.hidden_states[-1][:, -1:, :]
-            
+
             hf_last_id = hf_inputs["input_ids"][:, -1:]
             hf_last_emb = hf_target_model.get_input_embeddings()(hf_last_id)
-            
+
             # 2. Combine for HF Assistant input
             hf_assist_in = torch.cat([hf_last_emb, hf_last_hs], dim=-1)
-            
+
             # 3. Native HF Assistant forward pass (requires DynamicCache init)
             from transformers.cache_utils import DynamicCache
+
             hf_out = hf_model(
-                inputs_embeds=hf_assist_in, 
-                past_key_values=DynamicCache()
+                inputs_embeds=hf_assist_in, past_key_values=DynamicCache()
             )
             hf_logits = hf_out.logits.detach().cpu().float().numpy()
 
@@ -773,13 +770,18 @@ def _precompute_all_hf_outputs(
                 )
                 print(f"-> HF Speculative Text:\n{hf_generated_text}\n")
 
-        return {
-            "logits": hf_logits,
-            "last_hidden_state": hf_last_hs.detach().cpu().float().numpy(),
-            "last_embedding": hf_last_emb.detach().cpu().float().numpy(),
-            "generated_text": hf_generated_text,
-            "param_count": _count_hf_params(hf_model),
-        }, None, None, None
+        return (
+            {
+                "logits": hf_logits,
+                "last_hidden_state": hf_last_hs.detach().cpu().float().numpy(),
+                "last_embedding": hf_last_emb.detach().cpu().float().numpy(),
+                "generated_text": hf_generated_text,
+                "param_count": _count_hf_params(hf_model),
+            },
+            None,
+            None,
+            None,
+        )
 
     print("-> Precomputing HF outputs for text prompt...")
     hf_data_text = _precompute_hf_outputs(
@@ -972,11 +974,11 @@ def _verify_model(
                 PROMPT_TEXT, assistant_model=kh_assistant, max_length=30
             )
             print(f"-> KerasHub Speculative Text:\n{out}\n")
-            
-            # Note: Explicit character comparison is skipped because stochastic 
+
+            # Note: Explicit character comparison is skipped because stochastic
             # sampling streams differ natively across Torch and Keras engines.
             print("✓ Generation successful.")
-            
+
         return kh_assistant
 
     # ── Standard Model Branch ─────────────────────────────────────────────────
@@ -1194,7 +1196,11 @@ def _verify_model(
 
 
 def _save_preset(
-    gemma4_lm, keras_hub_preset, preset, save_dtype, final_logit_cap,
+    gemma4_lm,
+    keras_hub_preset,
+    preset,
+    save_dtype,
+    final_logit_cap,
     backbone_hidden_size=None,
 ):
     """Save the model to a local preset directory in the requested dtype."""
@@ -1203,8 +1209,8 @@ def _save_preset(
 
     if save_dtype == "bfloat16":
         preprocessor_ref = gemma4_lm.preprocessor
-        sampler_ref = getattr(gemma4_lm, "sampler", "greedy")
         del gemma4_lm
+
         gc.collect()
         if "assistant" in preset:
             from keras_hub.src.models.gemma4.gemma4_assistant_causal_lm import (

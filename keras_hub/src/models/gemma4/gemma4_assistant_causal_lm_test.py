@@ -11,7 +11,6 @@ from keras_hub.src.tests.test_case import TestCase
 
 
 class Gemma4AssistantTest(TestCase, parameterized.TestCase):
-
     def setUp(self):
         # Use small sizes for faster unit tests.
         # Note: num_kv_shared_layers is intentionally left at 0 (default) —
@@ -44,7 +43,9 @@ class Gemma4AssistantTest(TestCase, parameterized.TestCase):
             backbone_hidden_size=16,
             num_centroids=4,
             centroid_intermediate_top_k=2,
+            use_ordered_embeddings=True,
         )
+
 
     def test_call_with_cache(self):
         batch_size = 2

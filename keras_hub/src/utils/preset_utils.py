@@ -898,16 +898,26 @@ class KerasPresetSaver:
         if task.preprocessor is not None:
             tokenizer = getattr(task.preprocessor, "tokenizer", None)
         if tokenizer is not None:
-            if hasattr(tokenizer, "start_token_id") and tokenizer.start_token_id is not None:
+            if (
+                hasattr(tokenizer, "start_token_id")
+                and tokenizer.start_token_id is not None
+            ):
                 gen_cfg["bos_token_id"] = int(tokenizer.start_token_id)
-            if hasattr(tokenizer, "end_token_id") and tokenizer.end_token_id is not None:
+            if (
+                hasattr(tokenizer, "end_token_id")
+                and tokenizer.end_token_id is not None
+            ):
                 gen_cfg["eos_token_id"] = int(tokenizer.end_token_id)
-            if hasattr(tokenizer, "pad_token_id") and tokenizer.pad_token_id is not None:
+            if (
+                hasattr(tokenizer, "pad_token_id")
+                and tokenizer.pad_token_id is not None
+            ):
                 gen_cfg["pad_token_id"] = int(tokenizer.pad_token_id)
         # Sampler settings.
         sampler = getattr(task, "sampler", None)
         if sampler is not None and sampler != "greedy":
             from keras_hub.src.samplers.greedy_sampler import GreedySampler
+
             if not isinstance(sampler, GreedySampler):
                 gen_cfg["do_sample"] = True
                 if hasattr(sampler, "p") and sampler.p is not None:

@@ -165,9 +165,7 @@ class CausalLM(Task):
             import jax
 
             @partial(jax.jit, static_argnames=["stop_token_ids"])
-            def compiled_generate_function(
-                inputs, stop_token_ids, state
-            ):
+            def compiled_generate_function(inputs, stop_token_ids, state):
                 (
                     sampler_variables,
                     trainable_variables,

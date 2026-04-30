@@ -77,9 +77,10 @@ class Gemma4Backbone(Backbone):
             consecutive layers uses global attention; all others use local
             (sliding-window) attention. Defaults to `6`.
         layer_types: list of str or `None`. Explicit specification of the
-            attention type for every layer sequentially (e.g. `"full_attention"`,
-            `"sliding_attention"`). When `None`, type sequence is derived
-            from `sliding_window_pattern`. Defaults to `None`.
+            attention type for every layer sequentially
+            (e.g. `"full_attention"`, `"sliding_attention"`). When `None`,
+            type sequence is derived from `sliding_window_pattern`.
+            Defaults to `None`.
         global_head_dim: int or `None`. Per-head dimension used specifically
             for global attention layers. When `None`, `head_dim` is used
             for all layers. Defaults to `None`.
@@ -304,12 +305,15 @@ class Gemma4Backbone(Backbone):
         if num_kv_shared_layers > 0:
             if _first_kv_shared == 0:
                 # Assistant mode: all layers share KV externally.
-                # Mirror HF's hardcoded logic: assign arbitrary indices 0 and 1 based on type.
+                # Mirror HF's hardcoded logic: assign arbitrary indices
+                # 0 and 1 based on type.
                 for j in range(num_layers):
                     if layer_types is not None:
-                         _is_g = layer_types[j] == "full_attention"
+                        _is_g = layer_types[j] == "full_attention"
                     else:
-                         _is_g = (j % sliding_window_pattern) == (sliding_window_pattern - 1)
+                        _is_g = (j % sliding_window_pattern) == (
+                            sliding_window_pattern - 1
+                        )
                     _kv_source[j] = 1 if _is_g else 0
             else:
                 if layer_types is not None:
@@ -317,14 +321,19 @@ class Gemma4Backbone(Backbone):
                 else:
                     _non_shared_types = [
                         "global"
-                        if (j % sliding_window_pattern) == (sliding_window_pattern - 1)
+                        if (j % sliding_window_pattern)
+                        == (sliding_window_pattern - 1)
                         else "local"
                         for j in range(_first_kv_shared)
                     ]
-                # Map each shared layer index → the absolute index of its KV source.
+                # Map shared layer index → absolute index of its KV source.
                 for j in range(_first_kv_shared, num_layers):
                     if layer_types is not None:
-                        _type = "global" if layer_types[j] == "full_attention" else "local"
+                        _type = (
+                            "global"
+                            if layer_types[j] == "full_attention"
+                            else "local"
+                        )
                     else:
                         _is_g = (j % sliding_window_pattern) == (
                             sliding_window_pattern - 1

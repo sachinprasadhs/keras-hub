@@ -5,6 +5,7 @@ Usage:
         --hf_repo gg-hf-am/gemma-4-E2B-it-assistant \
         --output_dir ./gemma4_instruct_2b_assistant
 """
+
 import argparse
 import gc
 import json
@@ -70,7 +71,9 @@ def build_assistant(hf_config):
         num_kv_shared_layers=text_cfg.get("num_kv_shared_layers", 0),
         layer_norm_epsilon=text_cfg.get("rms_norm_eps", 1e-6),
         local_rope_wavelength=float(local_rope.get("rope_theta", 10_000.0)),
-        global_rope_wavelength=float(global_rope.get("rope_theta", 1_000_000.0)),
+        global_rope_wavelength=float(
+            global_rope.get("rope_theta", 1_000_000.0)
+        ),
         global_rope_partial_rotary_factor=float(
             global_rope.get("partial_rotary_factor", 1.0)
         ),
@@ -104,12 +107,24 @@ def port_weights(hf_weights, assistant, hf_config):
     def assign(var, arr):
         var.assign(arr)
 
-    assign(bb.token_embedding.embeddings, hf_weights["model.embed_tokens.weight"])
+    assign(
+        bb.token_embedding.embeddings, hf_weights["model.embed_tokens.weight"]
+    )
     assign(bb.layer_norm.scale, hf_weights["model.norm.weight"])
-    assign(assistant.pre_projection.kernel, hf_weights["pre_projection.weight"].T)
-    assign(assistant.post_projection.kernel, hf_weights["post_projection.weight"].T)
-    assign(assistant.centroids.kernel, hf_weights["masked_embedding.centroids.weight"].T)
-    assign(assistant.token_ordering, hf_weights["masked_embedding.token_ordering"].astype(np.int32))
+    assign(
+        assistant.pre_projection.kernel, hf_weights["pre_projection.weight"].T
+    )
+    assign(
+        assistant.post_projection.kernel, hf_weights["post_projection.weight"].T
+    )
+    assign(
+        assistant.centroids.kernel,
+        hf_weights["masked_embedding.centroids.weight"].T,
+    )
+    assign(
+        assistant.token_ordering,
+        hf_weights["masked_embedding.token_ordering"].astype(np.int32),
+    )
 
     for i, layer in enumerate(bb.transformer_layers):
         hfp = f"model.layers.{i}"
@@ -117,24 +132,46 @@ def port_weights(hf_weights, assistant, hf_config):
         q_head_dim = global_head_dim if is_global else head_dim
         attn = layer.attention
 
-        assign(layer.pre_attention_norm.scale, hf_weights[f"{hfp}.input_layernorm.weight"])
-        assign(layer.post_attention_norm.scale, hf_weights[f"{hfp}.post_attention_layernorm.weight"])
-        assign(layer.pre_ffw_norm.scale, hf_weights[f"{hfp}.pre_feedforward_layernorm.weight"])
-        assign(layer.post_ffw_norm.scale, hf_weights[f"{hfp}.post_feedforward_layernorm.weight"])
+        assign(
+            layer.pre_attention_norm.scale,
+            hf_weights[f"{hfp}.input_layernorm.weight"],
+        )
+        assign(
+            layer.post_attention_norm.scale,
+            hf_weights[f"{hfp}.post_attention_layernorm.weight"],
+        )
+        assign(
+            layer.pre_ffw_norm.scale,
+            hf_weights[f"{hfp}.pre_feedforward_layernorm.weight"],
+        )
+        assign(
+            layer.post_ffw_norm.scale,
+            hf_weights[f"{hfp}.post_feedforward_layernorm.weight"],
+        )
         assign(layer.layer_scalar, hf_weights[f"{hfp}.layer_scalar"].squeeze())
-        assign(attn.query_norm.scale, hf_weights[f"{hfp}.self_attn.q_norm.weight"])
+        assign(
+            attn.query_norm.scale, hf_weights[f"{hfp}.self_attn.q_norm.weight"]
+        )
 
         q_w = hf_weights[f"{hfp}.self_attn.q_proj.weight"]
-        q_w = q_w.reshape(num_q_heads, q_head_dim, hidden_size).transpose(0, 2, 1)
+        q_w = q_w.reshape(num_q_heads, q_head_dim, hidden_size).transpose(
+            0, 2, 1
+        )
         assign(attn.query_dense.kernel, q_w)
 
         o_w = hf_weights[f"{hfp}.self_attn.o_proj.weight"].T
         o_w = o_w.reshape(num_q_heads, q_head_dim, hidden_size)
         assign(attn.output_dense.kernel, o_w)
 
-        assign(layer.gating_ffw.kernel, hf_weights[f"{hfp}.mlp.gate_proj.weight"].T)
-        assign(layer.gating_ffw_2.kernel, hf_weights[f"{hfp}.mlp.up_proj.weight"].T)
-        assign(layer.ffw_linear.kernel, hf_weights[f"{hfp}.mlp.down_proj.weight"].T)
+        assign(
+            layer.gating_ffw.kernel, hf_weights[f"{hfp}.mlp.gate_proj.weight"].T
+        )
+        assign(
+            layer.gating_ffw_2.kernel, hf_weights[f"{hfp}.mlp.up_proj.weight"].T
+        )
+        assign(
+            layer.ffw_linear.kernel, hf_weights[f"{hfp}.mlp.down_proj.weight"].T
+        )
 
     print("All weights ported.")
 
@@ -153,10 +190,15 @@ def verify(assistant, hf_config):
     dummy_embedding = np.zeros((1, 1, backbone_hidden_size), dtype=np.float32)
     dummy_hs = np.zeros((1, 1, backbone_hidden_size), dtype=np.float32)
     dummy_cache = np.zeros(
-        (1, 6, 2, 4, num_kv_heads, max(head_dim, global_head_dim)), dtype=np.float32
+        (1, 6, 2, 4, num_kv_heads, max(head_dim, global_head_dim)),
+        dtype=np.float32,
     )
-    logits, next_hs = assistant.call_with_cache(dummy_embedding, dummy_hs, dummy_cache, 0)
-    print(f"logits: {tuple(ops.shape(logits))}, next_hs: {tuple(ops.shape(next_hs))}")
+    logits, next_hs = assistant.call_with_cache(
+        dummy_embedding, dummy_hs, dummy_cache, 0
+    )
+    print(
+        f"logits: {tuple(ops.shape(logits))}, next_hs: {tuple(ops.shape(next_hs))}"
+    )
     assert tuple(ops.shape(logits)) == (1, 1, vocab_size)
     assert tuple(ops.shape(next_hs)) == (1, 1, backbone_hidden_size)
     print("Verification passed.")
@@ -164,8 +206,12 @@ def verify(assistant, hf_config):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hf_repo", default="gg-hf-am/gemma-4-E2B-it-assistant")
-    parser.add_argument("--output_dir", default="./gemma4_instruct_2b_assistant")
+    parser.add_argument(
+        "--hf_repo", default="gg-hf-am/gemma-4-E2B-it-assistant"
+    )
+    parser.add_argument(
+        "--output_dir", default="./gemma4_instruct_2b_assistant"
+    )
     args = parser.parse_args()
 
     hf_config, generation_config, hf_weights = load_hf(args.hf_repo)
@@ -185,7 +231,9 @@ def main():
         for f in sorted(files):
             path = os.path.join(root, f)
             size = os.path.getsize(path)
-            print(f"  {os.path.relpath(path, args.output_dir):50s}  {size/1e6:.1f} MB")
+            print(
+                f"  {os.path.relpath(path, args.output_dir):50s}  {size / 1e6:.1f} MB"
+            )
 
 
 if __name__ == "__main__":

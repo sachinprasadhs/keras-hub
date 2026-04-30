@@ -1,61 +1,78 @@
 import os
-os.environ["KERAS_BACKEND"] = "jax"  # Using JAX as requested
 
-import keras_hub
+os.environ["KERAS_BACKEND"] = "jax"
+
 import time
+
+from keras_hub.src.models.gemma4.gemma4_assistant_causal_lm import (
+    Gemma4AssistantCausalLM,
+)
 from keras_hub.src.models.gemma4.gemma4_causal_lm import Gemma4CausalLM
-from keras_hub.src.models.gemma4.gemma4_assistant_causal_lm import Gemma4AssistantCausalLM
 
-# 1. Target Model Configuration 
-# Using gemma4_2b (base model) for technical verification as agreed,
-# since gemma4_instruct_2b download is failing due to truncation.
-TARGET_PRESET = "gemma4_2b"
-
-# 2. Assistant Model Configuration
-# Using HF on-the-fly conversion.
+TARGET_PRESET = "gemma4_instruct_2b"
 ASSISTANT_PRESET = "hf://gg-hf-am/gemma-4-E2B-it-assistant"
 
 print(f"\n-> Loading Target Model from Kaggle: {TARGET_PRESET}")
-target_model = Gemma4CausalLM.from_preset(
-    TARGET_PRESET, 
-    dtype="bfloat16"
-)
-target_model.run_eagerly = True
+target_model = Gemma4CausalLM.from_preset(TARGET_PRESET, dtype="bfloat16")
 
 print(f"\n-> Loading Assistant Model (ON-THE-FLY) from: {ASSISTANT_PRESET}")
 assistant_model = Gemma4AssistantCausalLM.from_preset(
-    ASSISTANT_PRESET, 
-    dtype="bfloat16"
+    ASSISTANT_PRESET, dtype="bfloat16"
 )
 
-PROMPT = "What are the 3 main ingredients in a traditional margarita?"
+# PROMPT = (
+#     "<start_of_turn>user\n"
+#     "What are the 3 main ingredients in a traditional margarita?"
+#     "<end_of_turn>\n<start_of_turn>model\n"
+# )
+import numpy as np
+import soundfile as sf
 
-print(f"\n--- STARTING SPECULATIVE GENERATION (JAX) ---")
-print(f"Prompt: '{PROMPT}'\n")
+AUDIO_FILE_PATH = "/usr/local/google/home/sachinprasad/Projects/KERAS-HUB/keras-hub/keras_hub/src/tests/test_data/audio_transcription_tests/male_short_voice_clip_3sec.wav"
 
-print("-> Tokenizing prompt...")
-inputs = target_model.preprocessor.generate_preprocess(PROMPT)
-print(f"-> Inputs keys before: {list(inputs.keys())}")
+try:
+    raw_audio, sr = sf.read(AUDIO_FILE_PATH)
+    if sr != 16000:
+        from scipy import signal
 
-# Remove masks that cause shape mismatch in speculative decoding (verify_next)
-inputs.pop("audio_mask", None)
-inputs.pop("vision_mask", None)
-inputs.pop("vision_indices", None)
-print(f"-> Inputs keys after: {list(inputs.keys())}")
+        raw_audio = signal.resample(raw_audio, int(len(raw_audio) * 16000 / sr))
+except Exception as e:
+    print(f"Warning: could not read audio ({e}), using silence.")
+    raw_audio = np.zeros((16000 * 3,), dtype=np.float32)
 
-# Detach preprocessor to avoid it adding them back during generate_preprocess
-target_model.preprocessor = None
+PROMPT_AUDIO = (
+    "<|turn>user\n"
+    "<|audio|>"
+    "Transcribe the following speech segment in its original language. "
+    "Follow these specific instructions for formatting the answer:\n"
+    "* Only output the transcription, with no newlines.\n"
+    "* When transcribing numbers, write the digits.<turn|>\n"
+    "<|turn>model\n"
+)
+
+# # Image configuration (commented out for now)
+# import requests
+# from PIL import Image
+# from io import BytesIO
+# IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
+# PROMPT_IMAGE = (
+#     "<start_of_turn>user\n\n<|image|>\nWhat is in this image?"
+#     "<end_of_turn>\n<start_of_turn>model\n"
+# )
+
+print("\n--- STARTING SPECULATIVE GENERATION (AUDIO) ---")
+print(f"Prompt: '{PROMPT_AUDIO}'\n")
 
 start_time = time.time()
 output = target_model.generate(
-    inputs,
+    {"prompts": [PROMPT_AUDIO], "audio": [raw_audio]},
     assistant_model=assistant_model,
-    max_length=64,
-    stop_token_ids=None,
+    max_length=2048,
 )
+
 
 duration = time.time() - start_time
 
+
 print(f"--- OUTPUT ---\n{output}\n")
 print(f"Generation completed in {duration:.2f} seconds.")
-print("\n✓ Demonstration successful. Technical integration verified on JAX!")

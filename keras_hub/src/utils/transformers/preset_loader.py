@@ -134,9 +134,15 @@ class TransformersPresetLoader(PresetLoader):
         architecture = self.config["architectures"][0]
         is_classifier = issubclass(cls, ImageClassifier)
         is_assistant = architecture == "Gemma4AssistantForCausalLM"
-        
+
+        if hasattr(self.converter, "convert_task_config"):
+            task_config = self.converter.convert_task_config(self.config)
+            kwargs = {**task_config, **kwargs}
+
         if not load_task_weights or (
-            not is_classifier and not is_assistant and architecture != "ViTModel"
+            not is_classifier
+            and not is_assistant
+            and architecture != "ViTModel"
         ):
             return super().load_task(
                 cls, load_weights, load_task_weights, **kwargs
@@ -151,11 +157,15 @@ class TransformersPresetLoader(PresetLoader):
         if hasattr(self.converter, "convert_sampler_config"):
             from keras_hub.src.utils.preset_utils import check_file_exists
             from keras_hub.src.utils.preset_utils import get_file
+
             if check_file_exists(self.preset, "generation_config.json"):
                 import json
+
                 with open(get_file(self.preset, "generation_config.json")) as f:
                     gen_cfg = json.load(f)
-                task.compile(sampler=self.converter.convert_sampler_config(gen_cfg))
+                task.compile(
+                    sampler=self.converter.convert_sampler_config(gen_cfg)
+                )
         return task
 
     def load_tokenizer(self, cls, config_name="tokenizer.json", **kwargs):

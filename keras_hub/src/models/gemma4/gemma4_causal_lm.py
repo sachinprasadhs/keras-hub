@@ -516,6 +516,7 @@ class Gemma4CausalLM(CausalLM):
         else:
             audio_embeddings = None
             audio_indices = None
+            audio_mask = None
 
         # Create and seed cache with a single forward pass.
         hidden_states, cache = self._build_cache(
@@ -572,7 +573,8 @@ class Gemma4CausalLM(CausalLM):
             # Slice the last prompt position hidden state as the seed.
             # hidden_states is (batch, seq, target_hidden_dim).
             init_last_hidden = ops.slice(
-                hidden_states, [0, start_pos, 0],
+                hidden_states,
+                [0, start_pos, 0],
                 [batch_size_, 1, self.backbone.hidden_dim],
             )
 
@@ -635,17 +637,30 @@ class Gemma4CausalLM(CausalLM):
                 cache_update_slice = ops.slice(
                     ~padding_mask, [0, safe_start], [batch, k + 1]
                 )
+                # Slice multimodal masks to match the verification window (k+1).
+                vision_mask_slice = (
+                    ops.slice(vision_mask, [0, safe_start], [batch, k + 1])
+                    if vision_mask is not None
+                    else None
+                )
+                audio_mask_slice = (
+                    ops.slice(audio_mask, [0, safe_start], [batch, k + 1])
+                    if audio_mask is not None
+                    else None
+                )
+                # Verification is post-prompt; media embeddings are in cache.
+                # Passing them here would cause out-of-bounds errors.
                 logits, _, updated_cache = self.call_with_cache(
                     token_ids=prompt_slice,
                     cache=target_cache,
                     cache_update_index=safe_start,
-                    img_embeddings=img_embeddings,
-                    vision_mask=vision_mask,
+                    img_embeddings=None,
+                    vision_mask=vision_mask_slice,
                     padding_mask=None,  # causal mask only; no padding filter
-                    vision_indices=vision_indices,
-                    audio_embeddings=audio_embeddings,
-                    audio_indices=audio_indices,
-                    audio_mask=audio_mask,
+                    vision_indices=None,
+                    audio_embeddings=None,
+                    audio_indices=None,
+                    audio_mask=audio_mask_slice,
                     cache_update_mask=cache_update_slice,
                 )
                 return logits, updated_cache

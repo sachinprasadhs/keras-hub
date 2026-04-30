@@ -162,8 +162,8 @@ backbone_presets = {
         "metadata": {
             "description": (
                 "Gemma 4 31B MTP Assistant model: 4-layer speculative-decoding "
-                "assistant for the 31B dense model. Uses Multi-Token Prediction "
-                "and a standard logit head to propose candidates."
+                "assistant for the 31B dense model. Uses Multi-Token "
+                "Prediction and a standard logit head to propose candidates."
             ),
             "params": 1330000000,
             "path": "gemma4",

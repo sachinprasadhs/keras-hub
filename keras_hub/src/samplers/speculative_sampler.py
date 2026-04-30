@@ -159,9 +159,7 @@ class SpeculativeSampler(Sampler):
                 # Respect existing prompt tokens (mask).
                 mask_val = mask[:, safe_idx]
                 existing = current_prompt[:, safe_idx]
-                in_bounds = ops.cast(
-                    (index + i) < max_length, next_token.dtype
-                )
+                in_bounds = ops.cast((index + i) < max_length, next_token.dtype)
                 next_token = ops.where(mask_val, existing, next_token)
                 next_token = ops.where(
                     ops.cast(in_bounds, "bool"), next_token, existing
@@ -226,12 +224,12 @@ class SpeculativeSampler(Sampler):
                 gather_idx = ops.expand_dims(
                     ops.cast(draft_ids, "int32"), axis=-1
                 )
-                p_target = ops.take_along_axis(
-                    p_probs, gather_idx, axis=-1
-                )[:, :, 0]
-                q_draft = ops.take_along_axis(
-                    q_probs, gather_idx, axis=-1
-                )[:, :, 0]
+                p_target = ops.take_along_axis(p_probs, gather_idx, axis=-1)[
+                    :, :, 0
+                ]
+                q_draft = ops.take_along_axis(q_probs, gather_idx, axis=-1)[
+                    :, :, 0
+                ]
 
                 r = random.uniform(
                     shape=ops.shape(p_target),
@@ -299,9 +297,9 @@ class SpeculativeSampler(Sampler):
                     gather_bonus, (batch_size, 1, vocab)
                 )
 
-                p_b = ops.take_along_axis(
-                    target_probs, gather_bonus_b, axis=1
-                )[:, 0, :]
+                p_b = ops.take_along_axis(target_probs, gather_bonus_b, axis=1)[
+                    :, 0, :
+                ]
 
                 # Clamp to avoid negative probabilities from floating-point
                 # error.
@@ -316,21 +314,16 @@ class SpeculativeSampler(Sampler):
                     axis=-1,
                 )
                 gather_q = ops.expand_dims(gather_q, axis=-1)
-                gather_q_b = ops.broadcast_to(
-                    gather_q, (batch_size, 1, vocab)
-                )
-                q_b = ops.take_along_axis(
-                    q_probs, gather_q_b, axis=1
-                )[:, 0, :]
+                gather_q_b = ops.broadcast_to(gather_q, (batch_size, 1, vocab))
+                q_b = ops.take_along_axis(q_probs, gather_q_b, axis=1)[:, 0, :]
 
                 all_accepted = ops.equal(min_accepted, ops.cast(k, "int32"))
                 res_probs = ops.maximum(
                     ops.cast(0.0, p_b.dtype),
                     ops.cast(p_b, p_b.dtype) - ops.cast(q_b, p_b.dtype),
                 )
-                res_sum = (
-                    ops.sum(res_probs, axis=-1, keepdims=True)
-                    + ops.cast(1e-7, res_probs.dtype)
+                res_sum = ops.sum(res_probs, axis=-1, keepdims=True) + ops.cast(
+                    1e-7, res_probs.dtype
                 )
                 res_probs = res_probs / res_sum
 
@@ -393,11 +386,7 @@ class SpeculativeSampler(Sampler):
             return (
                 final_prompt,
                 updated_cache if has_cache else cache,
-                (
-                    current_draft_cache
-                    if has_draft_cache
-                    else draft_cache
-                ),
+                (current_draft_cache if has_draft_cache else draft_cache),
                 new_index,
             )
 
