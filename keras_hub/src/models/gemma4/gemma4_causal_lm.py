@@ -597,6 +597,17 @@ class Gemma4CausalLM(CausalLM):
                 last_token_embedding = self.backbone.token_embedding(
                     last_token_id
                 )
+                # HF's candidate generator calls
+                # target_model.get_input_embeddings()(last_token_id),
+                # which uses Gemma4TextScaledWordEmbedding and applies
+                # embed_scale = sqrt(target_hidden_dim) internally.
+                # KH's ReversibleEmbedding has no internal scale, so we
+                # apply it here to match HF's convention.
+                embed_scale = ops.cast(
+                    ops.sqrt(self.backbone.hidden_dim),
+                    last_token_embedding.dtype,
+                )
+                last_token_embedding = last_token_embedding * embed_scale
                 # `last_hidden` is (batch, 1, backbone_hidden_size).
                 # `cur_target_cache` is the up-to-date target KV cache.
                 logits, next_hidden = _assistant.call_with_cache(

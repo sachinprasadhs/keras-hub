@@ -45,13 +45,22 @@ PRESET_MAP = {
     "gemma4_instruct_26b_a4b": "google/gemma-4-26B-A4B-it",
     "gemma4_31b": "google/gemma-4-31B",
     "gemma4_instruct_31b": "google/gemma-4-31B-it",
-    "gemma4_instruct_2b_assistant": "gg-hf-am/gemma-4-E2B-it-assistant",
-    "gemma4_instruct_4b_assistant": "gg-hf-am/gemma-4-E4B-it-assistant",
+    "gemma4_instruct_2b_assistant": "google/gemma-4-E2B-it-assistant",
+    "gemma4_instruct_4b_assistant": "google/gemma-4-E4B-it-assistant",
     "gemma4_instruct_26b_a4b_assistant": (
-        "gg-hf-am/gemma-4-26B-A4B-it-assistant"
+        "google/gemma-4-26B-A4B-it-assistant"
     ),
-    "gemma4_instruct_31b_assistant": "gg-hf-am/gemma-4-31B-it-assistant",
+    "gemma4_instruct_31b_assistant": "google/gemma-4-31B-it-assistant",
 }
+
+def get_model_capabilities(preset):
+    is_assistant = "assistant" in preset
+    return {
+        "is_assistant": is_assistant,
+        "is_audio": False,
+        "is_video": True,
+    }
+
 
 IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
 VIDEO_URL = (
@@ -67,15 +76,11 @@ AUDIO_FILE_PATH = os.path.join(
 )
 
 PROMPT_TEXT = (
-    "<start_of_turn>user\nWhat is the capital of France?"
-    "<end_of_turn>\n<start_of_turn>model\n"
+    "<|turn>user\nWhat is the capital of France?<turn|>\n<|turn>model\n"
 )
 
-# Image prompt: use HF-preprocessed inputs for numerics (HF uses PIL resize,
-# KH uses its own image converter, so pixel values differ slightly).
 PROMPT_IMAGE = (
-    "<start_of_turn>user\n\n<|image|>\nWhat is in this image?"
-    "<end_of_turn>\n<start_of_turn>model\n"
+    "<|turn>user\n\n<|image|>\nWhat is in this image?<turn|>\n<|turn>model\n"
 )
 
 PROMPT_AUDIO = (
@@ -125,33 +130,14 @@ def _load_test_image():
 
 
 def _download_test_video():
-    """Download the Big Buck Bunny test clip and decode to (T, H, W, C) uint8.
+    """Download Big Buck Bunny test clip and decode to (T, H, W, C)."""
+    import av
 
-    Requires PyAV (`pip install av`).  Returns None on any failure so that
-    video verification is simply skipped rather than crashing the script.
-    """
-    try:
-        import av
-    except ImportError:
-        print(
-            "Warning: PyAV not installed; skipping video download. "
-            "Install with `pip install av`."
-        )
-        return None
-    try:
-        response = requests.get(VIDEO_URL, timeout=60)
-        response.raise_for_status()
-        container = av.open(BytesIO(response.content))
-        frames = [
-            f.to_ndarray(format="rgb24") for f in container.decode(video=0)
-        ]
-        return np.stack(frames)  # (T, H, W, C), channels-last for KH
-    except Exception as e:
-        print(
-            f"Warning: could not download test video ({e}); "
-            f"skipping video verification."
-        )
-        return None
+    response = requests.get(VIDEO_URL, timeout=60)
+    response.raise_for_status()
+    container = av.open(BytesIO(response.content))
+    frames = [f.to_ndarray(format="rgb24") for f in container.decode(video=0)]
+    return np.stack(frames)  # (T, H, W, C), channels-last for KH
 
 
 def _count_hf_params(hf_model):
@@ -184,9 +170,11 @@ def _count_hf_params(hf_model):
     return num_params + num_buffers
 
 
-def _count_keras_hub_params(backbone):
+def _count_keras_hub_params(model):
     unique_weights = {
-        id(weight): weight for weight in backbone.weights
+        id(weight): weight
+        for weight in model.weights
+        if "token_ordering" not in weight.name
     }.values()
     return sum(weight.numpy().size for weight in unique_weights)
 
@@ -214,7 +202,6 @@ def _precompute_hf_outputs(
     )
     hf_inputs = {key: value.to(device) for key, value in hf_inputs.items()}
 
-    # Ensure HF inputs start with BOS to match KerasHub behavior.
     bos_id = hf_tokenizer.bos_token_id
     if bos_id is not None and hf_inputs["input_ids"][0, 0].item() != bos_id:
         bos = torch.full(
@@ -238,10 +225,6 @@ def _precompute_hf_outputs(
                 [mm_pad, hf_inputs["mm_token_type_ids"]], dim=1
             )
 
-    # Register a forward hook on embed_vision to capture the per-frame
-    # embeddings at text hidden size.  These are used in the
-    # "video (HF encoder injected)" numeric test to verify that the KH decoder
-    # is numerically correct independent of any video-preprocessing differences.
     _hooks = []
     _hf_model_inner = getattr(hf_model, "model", None)
     if _hf_model_inner is not None and raw_video is not None:
@@ -266,8 +249,6 @@ def _precompute_hf_outputs(
     hf_input_ids = hf_inputs["input_ids"].detach().cpu().numpy()
     hf_attention_mask = hf_inputs["attention_mask"].detach().cpu().numpy()
 
-    # Raw audio mel features are retained for the mel-spectrogram comparison
-    # test.
     hf_audio_features = None
     if "input_features" in hf_inputs:
         with torch.no_grad():
@@ -279,25 +260,15 @@ def _precompute_hf_outputs(
                     hf_af = hf_af.last_hidden_state
                 hf_audio_features = hf_af.detach().cpu().float().numpy()
 
-    # Capture video embeddings (after embed_vision projection, at text hidden
-    # dim).
     _vfe = locals().get("_video_frame_embeds")
     if raw_video is not None and _vfe:
-        # embed_vision may be called once for the full batch of frames
-        # (returning (N, T, H) or (N*T, H)) or once per frame (returning (T,
-        # H) each time).
-        # Concatenate all captured outputs along axis-0 then force a 3-D shape
-        # (1, total_tokens, H) regardless of the original layout.
-        stacked = np.concatenate(_vfe, axis=0)  # (N*T, H) or (N, T, H)
+        stacked = np.concatenate(_vfe, axis=0)
         if stacked.ndim == 2:
             total_tokens, Hd = stacked.shape
         else:
-            # 3-D: flatten frame/patch dims together
             stacked = stacked.reshape(-1, stacked.shape[-1])
             total_tokens, Hd = stacked.shape
-        hf_video_embeddings = stacked.reshape(
-            1, total_tokens, Hd
-        )  # (1, N*T, H)
+        hf_video_embeddings = stacked.reshape(1, total_tokens, Hd)
     else:
         hf_video_embeddings = None
 
@@ -351,41 +322,34 @@ def _precompute_hf_outputs(
     # Its shape is (num_videos, num_frames, max_patches, patch_pixels) → 4D,
     # so shape[1] is always the number of sampled frames.
     if raw_video is not None and "pixel_values_videos" in hf_inputs:
-        pv = hf_inputs["pixel_values_videos"]
-        ret["num_video_frames"] = int(pv.shape[1])
+        ret["num_video_frames"] = int(hf_inputs["pixel_values_videos"].shape[1])
     return ret
 
 
 def _build_preprocessor_free_inputs(
     backbone, hf_data, image_placeholder_id, audio_placeholder_id=None
 ):
+    """Build backbone inputs directly from HF data, bypassing the KH preprocessor."""
     token_ids = hf_data["input_ids"].astype(np.int32)
     padding_mask = hf_data["attention_mask"].astype(np.int32)
     batch_size = token_ids.shape[0]
 
-    if hf_data["pixel_values"] is not None:
-        pixel_values = hf_data["pixel_values"].astype(np.float32)[
-            :, np.newaxis, :, :
-        ]
+    pixel_values = hf_data.get("pixel_values")
+    if pixel_values is not None:
+        pixel_values = pixel_values.astype(np.float32)[:, np.newaxis, :, :]
     else:
         pixel_values = np.zeros((batch_size, 0, 1, 768), dtype=np.float32)
 
-    if hf_data["image_position_ids"] is not None:
-        pixel_position_ids = hf_data["image_position_ids"].astype(np.int32)[
-            :, np.newaxis, :, :
-        ]
+    pixel_position_ids = hf_data.get("image_position_ids")
+    if pixel_position_ids is not None:
+        pixel_position_ids = pixel_position_ids.astype(np.int32)
+        pixel_position_ids = pixel_position_ids[:, np.newaxis, :, :]
     else:
         pixel_position_ids = np.zeros((batch_size, 0, 1, 2), dtype=np.int32)
 
-    vision_mask = (token_ids == image_placeholder_id).astype(np.int32)
-    vision_rows = [
-        np.where(vision_mask[index])[0].astype(np.int32)
-        for index in range(batch_size)
-    ]
-    max_vision_tokens = max((len(row) for row in vision_rows), default=0)
-    vision_indices = np.zeros((batch_size, max_vision_tokens), dtype=np.int32)
-    for index, row in enumerate(vision_rows):
-        vision_indices[index, : len(row)] = row
+    vision_mask = (token_ids == image_placeholder_id)
+    vision_indices = np.where(vision_mask)[1]
+    vision_indices = vision_indices.reshape(batch_size, -1).astype(np.int32)
 
     sequence_length = token_ids.shape[1]
     position_ids = np.arange(sequence_length, dtype=np.int32)[np.newaxis, :]
@@ -398,14 +362,13 @@ def _build_preprocessor_free_inputs(
         "pixel_position_ids": ops.convert_to_tensor(pixel_position_ids),
         "position_ids": ops.convert_to_tensor(position_ids),
         "vision_indices": ops.convert_to_tensor(vision_indices),
-        "vision_mask": ops.convert_to_tensor(vision_mask),
+        "vision_mask": ops.convert_to_tensor(vision_mask.astype(np.int32)),
     }
 
     if "input_features" in hf_data:
         audio_mel = hf_data["input_features"][:, np.newaxis, :, :]
         keras_hub_inputs["audio_mel"] = ops.convert_to_tensor(audio_mel)
 
-        # All frames are valid (HF pads to fixed length).
         audio_mel_mask = np.ones(
             (batch_size, 1, audio_mel.shape[2]), dtype=bool
         )
@@ -414,21 +377,10 @@ def _build_preprocessor_free_inputs(
         )
 
         if audio_placeholder_id is not None:
-            audio_mask = (token_ids == audio_placeholder_id).astype(np.int32)
-            audio_rows = [
-                np.where(audio_mask[index])[0].astype(np.int32)
-                for index in range(batch_size)
-            ]
-            max_audio_tokens = max((len(row) for row in audio_rows), default=0)
-            audio_indices = np.zeros(
-                (batch_size, max_audio_tokens), dtype=np.int32
-            )
-            for index, row in enumerate(audio_rows):
-                audio_indices[index, : len(row)] = row
-            keras_hub_inputs["audio_indices"] = ops.convert_to_tensor(
-                audio_indices
-            )
-            keras_hub_inputs["audio_mask"] = ops.convert_to_tensor(audio_mask)
+            audio_mask = (token_ids == audio_placeholder_id)
+            audio_indices = np.where(audio_mask)[1].reshape(batch_size, -1).astype(np.int32)
+            keras_hub_inputs["audio_indices"] = ops.convert_to_tensor(audio_indices)
+            keras_hub_inputs["audio_mask"] = ops.convert_to_tensor(audio_mask.astype(np.int32))
     else:
         feat_size = getattr(backbone.audio_encoder, "input_feat_size", 128)
         keras_hub_inputs["audio_mel"] = ops.convert_to_tensor(
@@ -449,21 +401,7 @@ def _build_preprocessor_free_inputs(
 
 @contextlib.contextmanager
 def _mock_encoder_call(encoder, hf_embeddings, n_clips=1):
-    """Temporarily replace encoder.call so the backbone uses pre-computed HF
-    embeddings instead of running the KH encoder.
-
-    This lets us verify the KH decoder in isolation: if the test passes when
-    HF's encoder output is injected but fails with KH's preprocessor output,
-    the divergence is in preprocessing (e.g. pixel normalisation), not the
-    decoder weights.
-
-    Args:
-        encoder: KH encoder layer whose `.call` will be monkey-patched.
-        hf_embeddings: numpy array (B, T, H) — HF encoder output at text
-            hidden size, as captured by a forward hook on `embed_vision`.
-        n_clips: number of clips/frames axis expected by the backbone
-            (backbone shape: (B, n_clips, T//n_clips, H)).
-    """
+    """Temporarily replace encoder.call with pre-computed HF embeddings."""
     B, T, Hd = hf_embeddings.shape
     hf_4d = hf_embeddings.reshape(B, n_clips, T // n_clips, Hd).astype(
         np.float32
@@ -506,13 +444,7 @@ def _test_audio_preprocessor(preprocessor, raw_audio, hf_input_features):
 
 
 def _test_numerics(label, backbone, keras_hub_inputs, hf_logits):
-    """Assert backbone logits match HF logits within 1e-3 tolerance.
-
-    `backbone.token_embedding(..., reverse=True)` already applies
-    `final_logit_soft_cap` (via `logit_soft_cap` on `ReversibleEmbedding`), so
-    the KH logits are already in the same softcapped space as HF's logits.
-    No extra transformation is needed here.
-    """
+    """Assert backbone logits match HF logits within 1e-3 tolerance."""
     if isinstance(keras_hub_inputs, tuple):
         keras_hub_inputs = keras_hub_inputs[0]
 
@@ -539,7 +471,6 @@ def _test_numerics(label, backbone, keras_hub_inputs, hf_logits):
 
     with torch.no_grad():
         kh_output = backbone(keras_hub_inputs)
-        # Trim if KH sequence is longer than HF (e.g. due to padding).
         if kh_output.shape[1] > hf_logits.shape[1]:
             kh_output = kh_output[:, : hf_logits.shape[1], :]
 
@@ -592,10 +523,6 @@ def _test_generate(
     )
     kh_text = kh_output[0] if isinstance(kh_output, list) else kh_output
     if isinstance(kh_text, str):
-        # Strip the prompt prefix. For modalities like audio/video the
-        # preprocessor expands placeholder tokens, so the output no longer
-        # starts with the literal prompt string. Instead, find the last
-        # model-turn marker and strip everything up to and including it.
         if kh_text.startswith(prompt):
             kh_text = kh_text[len(prompt) :]
         else:
@@ -634,9 +561,8 @@ def _load_test_assets():
         frames = [
             f.to_ndarray(format="rgb24") for f in container.decode(video=0)
         ]
-        raw_video = np.stack(frames)  # (T, H, W, C) channels-last for KH
+        raw_video = np.stack(frames)
     else:
-        # No local path supplied — download the standard Big Buck Bunny clip.
         raw_video = _download_test_video()
 
     return raw_image, raw_audio, raw_video
@@ -647,10 +573,7 @@ def _load_hf_model(hf_preset):
     is_assistant = "assistant" in hf_preset
     hf_target_model = None
     if is_assistant:
-        # Derive the large Target Model ID corresponding to this assistant.
-        hf_target_id = hf_preset.replace("gg-hf-am/", "google/").replace(
-            "-assistant", ""
-        )
+        hf_target_id = hf_preset.replace("-assistant", "")
         print(f"-> Loading HF Target Model: {hf_target_id}")
         hf_target_model = AutoModelForCausalLM.from_pretrained(
             hf_target_id,
@@ -661,16 +584,16 @@ def _load_hf_model(hf_preset):
         print(f"-> Loading HF Assistant Model: {hf_preset}")
         hf_model = AutoModelForCausalLM.from_pretrained(
             hf_preset,
-            device_map="cpu",
             torch_dtype=torch.float32,
             force_download=False,
+            low_cpu_mem_usage=False,
         )
     else:
         hf_model = AutoModelForMultimodalLM.from_pretrained(
             hf_preset,
-            device_map="cpu",
             torch_dtype=torch.float32,
             force_download=False,
+            low_cpu_mem_usage=False,
         )
     hf_tokenizer = AutoTokenizer.from_pretrained(
         hf_preset, return_tensors="pt", force_download=False
@@ -696,6 +619,7 @@ def _load_hf_model(hf_preset):
         and processor.video_processor is not None
     )
 
+
     final_logit_cap = getattr(hf_model.config, "final_logit_softcapping", None)
     if final_logit_cap is None and hasattr(hf_model.config, "get_text_config"):
         final_logit_cap = getattr(
@@ -714,47 +638,56 @@ def _load_hf_model(hf_preset):
     )
 
 
-def _precompute_all_hf_outputs(
+# ─── 1. LOADING & PRECOMPUTATION HELPERS ─────────────────────────────────────
+
+
+def precompute_hf_outputs(
     hf_model,
     hf_tokenizer,
     processor,
     raw_image,
     raw_audio,
     raw_video,
-    is_audio_model,
-    is_video_model,
+    capabilities,
     skip_generate=False,
-    target_model=None,
     hf_target_model=None,
 ):
-    """Run HF forward passes for all applicable modalities and return
-    results."""
-    # ── Assistant Path: 100% Native HF Integrated Verification ────────────────
+    """Run HF forward passes for all applicable modalities."""
+    results = {}
+
     if hf_target_model is not None:
         print("-> Assistant Mode: Extracting states natively from HF Target...")
         hf_inputs = hf_tokenizer(PROMPT_TEXT, return_tensors="pt")
 
         with torch.no_grad():
-            # 1. Native HF Target forward pass
-            target_out = hf_target_model(**hf_inputs, output_hidden_states=True)
-            # Extract last hidden state and last embedding natively
+            target_out = hf_target_model(
+                **hf_inputs,
+                output_hidden_states=True,
+                return_shared_kv_states=True,
+            )
             hf_last_hs = target_out.hidden_states[-1][:, -1:, :]
-
             hf_last_id = hf_inputs["input_ids"][:, -1:]
             hf_last_emb = hf_target_model.get_input_embeddings()(hf_last_id)
-
-            # 2. Combine for HF Assistant input
             hf_assist_in = torch.cat([hf_last_emb, hf_last_hs], dim=-1)
 
-            # 3. Native HF Assistant forward pass (requires DynamicCache init)
-            from transformers.cache_utils import DynamicCache
+            real_shared_kv = target_out.shared_kv_states
+            zero_shared_kv = {
+                k: (torch.zeros_like(v[0]), torch.zeros_like(v[1]))
+                for k, v in real_shared_kv.items()
+            }
+
+            seq_len = hf_inputs["input_ids"].shape[1]
+            position_ids = torch.tensor([[seq_len - 1]], dtype=torch.long)
 
             hf_out = hf_model(
-                inputs_embeds=hf_assist_in, past_key_values=DynamicCache()
+                inputs_embeds=hf_assist_in,
+                attention_mask=hf_inputs["attention_mask"],
+                position_ids=position_ids,
+                shared_kv_states=zero_shared_kv,
+                use_cache=False,
             )
             hf_logits = hf_out.logits.detach().cpu().float().numpy()
 
-            # 4. Native HF Integrated Speculative Generation
             hf_generated_text = None
             if not skip_generate:
                 print("-> Running reference HF Speculative Generation...")
@@ -770,21 +703,17 @@ def _precompute_all_hf_outputs(
                 )
                 print(f"-> HF Speculative Text:\n{hf_generated_text}\n")
 
-        return (
-            {
-                "logits": hf_logits,
-                "last_hidden_state": hf_last_hs.detach().cpu().float().numpy(),
-                "last_embedding": hf_last_emb.detach().cpu().float().numpy(),
-                "generated_text": hf_generated_text,
-                "param_count": _count_hf_params(hf_model),
-            },
-            None,
-            None,
-            None,
-        )
+        results["assistant"] = {
+            "logits": hf_logits,
+            "last_hidden_state": hf_last_hs.detach().cpu().float().numpy(),
+            "last_embedding": hf_last_emb.detach().cpu().float().numpy(),
+            "generated_text": hf_generated_text,
+            "param_count": _count_hf_params(hf_model),
+        }
+        return results
 
     print("-> Precomputing HF outputs for text prompt...")
-    hf_data_text = _precompute_hf_outputs(
+    results["text"] = _precompute_hf_outputs(
         hf_model,
         hf_tokenizer,
         processor,
@@ -794,7 +723,7 @@ def _precompute_all_hf_outputs(
     )
 
     print("-> Precomputing HF outputs for image prompt...")
-    hf_data_image = _precompute_hf_outputs(
+    results["image"] = _precompute_hf_outputs(
         hf_model,
         hf_tokenizer,
         processor,
@@ -803,10 +732,9 @@ def _precompute_all_hf_outputs(
         skip_generate=skip_generate,
     )
 
-    hf_data_audio = None
-    if is_audio_model:
+    if capabilities["is_audio"]:
         print("-> Precomputing HF outputs for audio prompt...")
-        hf_data_audio = _precompute_hf_outputs(
+        results["audio"] = _precompute_hf_outputs(
             hf_model,
             hf_tokenizer,
             processor,
@@ -816,13 +744,8 @@ def _precompute_all_hf_outputs(
             skip_generate=skip_generate,
         )
 
-    hf_data_video = None
-    if is_video_model and raw_video is not None:
+    if capabilities["is_video"] and raw_video is not None:
         print("-> Precomputing HF outputs for video prompt...")
-        # Pre-subsample to processor's expected frame count so that HF stores
-        # frames_indices = [0, 1, ..., N-1].  When KH also receives these same
-        # N frames it uses sequential indices for timestamps, so both pipelines
-        # produce identical timestamp tokens (i / fps for i in 0..N-1).
         hf_num_frames = getattr(processor.video_processor, "num_frames", 32)
         T = raw_video.shape[0]
         if T > hf_num_frames:
@@ -832,9 +755,8 @@ def _precompute_all_hf_outputs(
             raw_video_sub = raw_video[sub_indices]
         else:
             raw_video_sub = raw_video
-        # HF expects channels-first (T, C, H, W).
         raw_video_hf = np.transpose(raw_video_sub, (0, 3, 1, 2))
-        hf_data_video = _precompute_hf_outputs(
+        results["video"] = _precompute_hf_outputs(
             hf_model,
             hf_tokenizer,
             processor,
@@ -844,10 +766,9 @@ def _precompute_all_hf_outputs(
             raw_video=raw_video_hf,
             skip_generate=skip_generate,
         )
-        # Store subsampled frames (channels-last) for KH verification.
-        hf_data_video["raw_video_sub"] = raw_video_sub
+        results["video"]["raw_video_sub"] = raw_video_sub
 
-    return hf_data_text, hf_data_image, hf_data_audio, hf_data_video
+    return results
 
 
 def _load_keras_hub_model(keras_hub_preset, is_audio_model):
@@ -859,196 +780,31 @@ def _load_keras_hub_model(keras_hub_preset, is_audio_model):
     preprocessor = keras_hub.models.Gemma4CausalLMPreprocessor.from_preset(
         keras_hub_preset
     )
-    # The preset loader sets audio_converter only when the HF config declares
-    # an audio_config; clear it explicitly for text/image-only models.
     if not is_audio_model:
         preprocessor.audio_converter = None
     print("-> KerasHub model loaded.")
     return backbone, tokenizer, preprocessor
 
 
-def _verify_model(
-    backbone,
-    tokenizer,
-    preprocessor,
-    hf_data_text,
-    hf_data_image,
-    hf_data_audio,
-    hf_data_video,
-    raw_image,
-    raw_audio,
-    raw_video,
-    is_audio_model,
-    is_video_model,
-    final_logit_cap,
-    target_model=None,
-):
-    """Run all four verification stages and return the assembled
-    Gemma4CausalLM."""
-    # ── Assistant Branch: Dedicated verification flow ─────────────────────────
-    if target_model is not None:
-        print("\n--- Running Assistant Verification ---")
-        from keras_hub.src.models.gemma4.gemma4_assistant_causal_lm import (
-            Gemma4AssistantCausalLM,
-        )
-
-        # 1. Parameter count (Backbone parameters)
-        kh_params = _count_keras_hub_params(backbone)
-        hf_params = hf_data_text["param_count"]
-        np.testing.assert_equal(kh_params, hf_params)
-        print(f"✓ Parameter count match: {kh_params:,}")
-
-        # 2. Explicit numerics comparison
-        print("\n--- Numerics Verification ---")
-
-        # Instantiate Assistant Model using the target backbone's hidden_dim
-        # so that pre_projection / post_projection are sized correctly for any
-        # target (2B → 1536, 4B → 2560, 26B → 4096, etc.).
-        target_hidden_size = target_model.backbone.hidden_dim
-        kh_assistant = Gemma4AssistantCausalLM(
-            backbone=backbone,
-            backbone_hidden_size=target_hidden_size,
-        )
-
-        # Inject HF's own last_hidden_state and last_embedding directly so
-        # the numerics check is decoupled from any KH-vs-HF target model
-        # floating-point differences.  This tests the assistant projection
-        # layers in isolation.
-        last_hs = ops.convert_to_tensor(
-            hf_data_text["last_hidden_state"].astype(np.float32)
-        )
-        last_emb = ops.convert_to_tensor(
-            hf_data_text["last_embedding"].astype(np.float32)
-        )
-
-        # Build a minimal dummy cache (all zeros). The assistant cache stores
-        # KV for its own 4-layer transformer; initial zeros are correct for a
-        # first-token forward pass.
-        dummy_seq_len = 16
-        num_layers = backbone.num_layers
-        num_heads = backbone.num_key_value_heads
-        head_dim = backbone.head_dim
-        with torch.no_grad():
-            cache = ops.zeros(
-                (1, num_layers, 2, dummy_seq_len, num_heads, head_dim),
-                dtype=backbone.compute_dtype,
-            )
-
-            # Call Assistant natively
-            kh_logits, _ = kh_assistant.call_with_cache(
-                last_token_embedding=last_emb,
-                last_hidden_state=last_hs,
-                target_cache=cache,
-                cache_update_index=0,
-            )
-        kh_logits = ops.convert_to_numpy(kh_logits)
-
-        hf_logits_ref = hf_data_text["logits"]
-        abs_diff = np.abs(kh_logits - hf_logits_ref)
-        max_diff = float(np.max(abs_diff))
-        mean_diff = float(np.mean(abs_diff))
-        try:
-            np.testing.assert_allclose(
-                kh_logits, hf_logits_ref, atol=1e-3, rtol=1e-3
-            )
-            print(
-                f"✓ Assistant output logits within tolerance "
-                f"(max={max_diff:.6f}, mean={mean_diff:.6f})."
-            )
-        except AssertionError:
-            tol = 1e-3 + 1e-3 * np.abs(hf_logits_ref)
-            mismatched = int(np.sum(abs_diff > tol))
-            total = hf_logits_ref.size
-            pct = 100.0 * (1.0 - mismatched / total)
-            print(
-                f"⚠️  Assistant logits exceed 1e-3 tolerance — "
-                f"max={max_diff:.6f}, mean={mean_diff:.6f}, "
-                f"matching={pct:.2f}% ({total - mismatched}/{total}).\n"
-                "    NOTE: Generate comparison is the authoritative check."
-            )
-
-        # 3. Integrated speculative generate check
-        if not FLAGS.skip_generate:
-            print("\n--- Speculative Generate Integration Check ---")
-            out = target_model.generate(
-                PROMPT_TEXT, assistant_model=kh_assistant, max_length=30
-            )
-            print(f"-> KerasHub Speculative Text:\n{out}\n")
-
-            # Note: Explicit character comparison is skipped because stochastic
-            # sampling streams differ natively across Torch and Keras engines.
-            print("✓ Generation successful.")
-
-        return kh_assistant
-
-    # ── Standard Model Branch ─────────────────────────────────────────────────
-    kh_params = _count_keras_hub_params(backbone)
-    hf_params = hf_data_image["param_count"]
-    np.testing.assert_equal(kh_params, hf_params)
-    print(f"\n✓ Parameter count: {kh_params:,}")
-
-    # ── 2. Token ID verification (all modalities) ─────────────────────────────
-    print("\n--- Token ID Verification ---")
-
-    _test_token_ids(
-        "text", preprocessor, PROMPT_TEXT, hf_data_text["input_ids"]
-    )
-
-    # Patch num_vision_tokens_per_image to the actual value used by HF so that
-    # KH produces the same number of soft image tokens.
-    actual_num_tokens = int(
-        np.sum(hf_data_image["input_ids"][0] == tokenizer.image_placeholder_id)
-    )
-    saved_num_tokens = preprocessor.num_vision_tokens_per_image
-    preprocessor.num_vision_tokens_per_image = actual_num_tokens
-    _test_token_ids(
-        "image",
-        preprocessor,
-        PROMPT_IMAGE,
-        hf_data_image["input_ids"],
-        images=raw_image,
-    )
-    preprocessor.num_vision_tokens_per_image = saved_num_tokens
-
-    if is_audio_model and hf_data_audio is not None:
-        _test_token_ids(
-            "audio",
-            preprocessor,
-            PROMPT_AUDIO,
-            hf_data_audio["input_ids"],
-            audio=raw_audio,
-        )
-
-    if is_video_model and hf_data_video is not None:
-        # Use the same pre-subsampled frames that were fed to HF.  Both
-        # pipelines then compute timestamps from sequential indices [0..N-1]
-        # so timestamp tokens align.  KH derives tokens-per-frame dynamically
-        # via _compute_video_n_tokens(), so no num_vision_tokens_per_image
-        # patching is needed here.
-        raw_video_sub = hf_data_video["raw_video_sub"]
-        hf_video_seq_len = hf_data_video["input_ids"].shape[1]
-        saved_num_frames_per_video = preprocessor.num_frames_per_video
-        # The packer trims at self.sequence_length before the per-call override
-        # is applied, so we must widen it to accommodate the full video
-        # sequence.
-        # Use +1 to avoid dropping the final trailing \n token.
-        saved_packer_seq_len = preprocessor.packer.sequence_length
-        preprocessor.num_frames_per_video = raw_video_sub.shape[0]
-        preprocessor.packer.sequence_length = hf_video_seq_len + 1
-        _test_token_ids(
-            "video",
-            preprocessor,
-            PROMPT_VIDEO,
-            hf_data_video["input_ids"],
-            videos=raw_video_sub,
-        )
-        preprocessor.num_frames_per_video = saved_num_frames_per_video
+@contextlib.contextmanager
+def _temp_preprocessor_override(preprocessor, num_frames, sequence_length):
+    """Temporarily override preprocessor settings for video verification."""
+    saved_num_frames = preprocessor.num_frames_per_video
+    saved_packer_seq_len = preprocessor.packer.sequence_length
+    preprocessor.num_frames_per_video = num_frames
+    preprocessor.packer.sequence_length = sequence_length
+    try:
+        yield
+    finally:
+        preprocessor.num_frames_per_video = saved_num_frames
         preprocessor.packer.sequence_length = saved_packer_seq_len
 
-    # ── 3. Numerics / logit verification ──────────────────────────────────────
-    print("\n--- Numerics Verification ---")
 
-    # Text: token IDs match HF so feed through KH preprocessor directly.
+# ─── 2. MODALITY VERIFIERS ──────────────────────────────────────────────────
+
+
+def verify_text_modality(backbone, preprocessor, hf_data_text):
+    """Numerics check for text."""
     kh_inputs_text = preprocessor.generate_preprocess(
         {"prompts": [PROMPT_TEXT]},
         sequence_length=hf_data_text["logits"].shape[1],
@@ -1057,7 +813,9 @@ def _verify_model(
         "text (KH preproc)", backbone, kh_inputs_text, hf_data_text["logits"]
     )
 
-    # Image: use HF-preprocessed pixel values to avoid PIL vs KH resize delta.
+
+def verify_image_modality(backbone, tokenizer, hf_data_image, raw_image):
+    """Numerics check for image."""
     kh_inputs_image = _build_preprocessor_free_inputs(
         backbone, hf_data_image, tokenizer.image_placeholder_id
     )
@@ -1065,43 +823,35 @@ def _verify_model(
         "image (HF preproc)", backbone, kh_inputs_image, hf_data_image["logits"]
     )
 
-    # Audio: KH mel pipeline aligns with HF within 1e-3.
-    if is_audio_model and hf_data_audio is not None:
-        _test_audio_preprocessor(
-            preprocessor, raw_audio, hf_data_audio["input_features"]
-        )
-        kh_inputs_audio = preprocessor(
-            {
-                "prompts": [PROMPT_AUDIO],
-                "audio": [raw_audio],
-                "responses": [""],
-            },
-            sequence_length=hf_data_audio["logits"].shape[1] + 1,
-        )
-        _test_numerics(
-            "audio (KH preproc)",
-            backbone,
-            kh_inputs_audio,
-            hf_data_audio["logits"],
-        )
 
-    # Video: two numeric checks are run.
-    #   1. "video (KH preproc)" — end-to-end using KH's video preprocessor.
-    #      A logit mismatch here is expected and acceptable: KH and HF use
-    #      slightly different frame resizing/normalisation pipelines, so the
-    #      pixel values fed to the vision encoder differ.
-    #   2. "video (HF encoder injected)" — the backbone is run with HF's own
-    #      vision-encoder output injected in place of KH's.  This test is the
-    #      authoritative decoder correctness check: it passes iff the KH
-    #      decoder weights and architecture are correct, independent of
-    #      preprocessing differences.
-    if is_video_model and hf_data_video is not None:
-        raw_video_sub = hf_data_video["raw_video_sub"]
-        hf_video_seq_len = hf_data_video["logits"].shape[1]
-        saved_num_frames_per_video = preprocessor.num_frames_per_video
-        saved_packer_seq_len = preprocessor.packer.sequence_length
-        preprocessor.num_frames_per_video = raw_video_sub.shape[0]
-        preprocessor.packer.sequence_length = hf_video_seq_len + 1
+def verify_audio_modality(backbone, preprocessor, hf_data_audio, raw_audio):
+    """Numerics check for audio."""
+    _test_audio_preprocessor(
+        preprocessor, raw_audio, hf_data_audio["input_features"]
+    )
+    kh_inputs_audio = preprocessor(
+        {
+            "prompts": [PROMPT_AUDIO],
+            "audio": [raw_audio],
+            "responses": [""],
+        },
+        sequence_length=hf_data_audio["logits"].shape[1] + 1,
+    )
+    _test_numerics(
+        "audio (KH preproc)",
+        backbone,
+        kh_inputs_audio,
+        hf_data_audio["logits"],
+    )
+
+
+def verify_video_modality(backbone, preprocessor, hf_data_video):
+    """Numerics check for video."""
+    raw_video_sub = hf_data_video["raw_video_sub"]
+    hf_video_seq_len = hf_data_video["logits"].shape[1]
+    with _temp_preprocessor_override(
+        preprocessor, raw_video_sub.shape[0], hf_video_seq_len + 1
+    ):
         kh_inputs_video = preprocessor(
             {
                 "prompts": [PROMPT_VIDEO],
@@ -1110,18 +860,12 @@ def _verify_model(
             },
             sequence_length=hf_video_seq_len + 1,
         )
-        # Test 1: end-to-end with KH preprocessor.
         _test_numerics(
             "video (KH preproc)",
             backbone,
             kh_inputs_video,
             hf_data_video["logits"],
         )
-        # Test 2: inject HF vision-encoder outputs to verify decoder
-        # correctness.
-        # n_clips = number of frames (each frame is processed as a separate
-        # image by the vision encoder, giving shape (B, n_clips, T_per_frame,
-        # H)).
         if hf_data_video.get("hf_video_embeddings") is not None:
             n_frames = raw_video_sub.shape[0]
             with _mock_encoder_call(
@@ -1135,64 +879,228 @@ def _verify_model(
                     kh_inputs_video,
                     hf_data_video["logits"],
                 )
-        preprocessor.num_frames_per_video = saved_num_frames_per_video
-        preprocessor.packer.sequence_length = saved_packer_seq_len
 
-    # ── 4. Generation comparison (all modalities) ─────────────────────────────
-    gemma4_lm = keras_hub.models.Gemma4CausalLM(
-        backbone=backbone,
-        preprocessor=preprocessor,
-        sampler="greedy",
-        final_logit_cap=final_logit_cap,
+
+def verify_assistant_mode(kh_assistant, hf_data, target_model):
+    """Specialized verification for assistant."""
+    print("\n--- Running Assistant Verification ---")
+    
+    # 1. Parameter count
+    kh_params = _count_keras_hub_params(kh_assistant)
+    hf_params = hf_data["param_count"]
+    np.testing.assert_equal(kh_params, hf_params)
+    print(f"✓ Parameter count match: {kh_params:,}")
+
+    # 2. Numerics check
+    print("\n--- Numerics Verification ---")
+    last_hs = hf_data["last_hidden_state"].astype(np.float32)
+    last_hs = ops.convert_to_tensor(last_hs)
+    last_emb = hf_data["last_embedding"].astype(np.float32)
+    last_emb = ops.convert_to_tensor(last_emb)
+    
+    dummy_seq_len = 16
+    num_layers = kh_assistant.backbone.num_layers
+    num_heads = kh_assistant.backbone.num_key_value_heads
+    head_dim = getattr(
+        kh_assistant.backbone,
+        "global_head_dim",
+        kh_assistant.backbone.head_dim,
     )
+    with torch.no_grad():
+        cache = ops.zeros(
+            (1, num_layers, 2, dummy_seq_len, num_heads, head_dim),
+            dtype=kh_assistant.backbone.compute_dtype,
+        )
+        kh_logits, _ = kh_assistant.call_with_cache(
+            last_token_embedding=last_emb,
+            last_hidden_state=last_hs,
+            target_cache=cache,
+            cache_update_index=0,
+        )
+    kh_logits = ops.convert_to_numpy(kh_logits)
+    hf_logits_ref = hf_data["logits"]
 
-    if FLAGS.skip_generate:
-        print("\n--- Generation Comparison: SKIPPED (--skip_generate) ---")
-        return gemma4_lm
+    # KH uses -inf for non-active centroid positions; HF uses (min_logit - 1.0).
+    # Compare only the active (finite) positions — they must match if weights
+    # are correctly ported.
+    active_mask = np.isfinite(kh_logits)
+    np.testing.assert_allclose(
+        kh_logits[active_mask], hf_logits_ref[active_mask], atol=1e-3, rtol=1e-3
+    )
+    print("✓ Assistant output logits within tolerance.")
 
+    # 3. Generate check
+    if not FLAGS.skip_generate:
+        print("\n--- Speculative Generate Integration Check ---")
+        out = target_model.generate(
+            PROMPT_TEXT, assistant_model=kh_assistant, max_length=30
+        )
+        print(f"-> KerasHub Speculative Text:\n{out}\n")
+        print("✓ Generation successful.")
+
+
+def test_generation(
+    gemma4_lm, hf_data, capabilities, raw_image, raw_audio, raw_video
+):
+    """Compare generation results."""
     print("\n--- Generation Comparison ---")
     _test_generate(
-        "text", gemma4_lm, PROMPT_TEXT, hf_data_text["generated_text"]
+        "text", gemma4_lm, PROMPT_TEXT, hf_data["text"]["generated_text"]
     )
-
-    preprocessor.num_vision_tokens_per_image = actual_num_tokens
+    
+    # Image
+    actual_num_tokens = int(
+        np.sum(
+            hf_data["image"]["input_ids"][0]
+            == gemma4_lm.preprocessor.tokenizer.image_placeholder_id
+        )
+    )
+    saved_num_tokens = gemma4_lm.preprocessor.num_vision_tokens_per_image
+    gemma4_lm.preprocessor.num_vision_tokens_per_image = actual_num_tokens
     _test_generate(
         "image",
         gemma4_lm,
         PROMPT_IMAGE,
-        hf_data_image["generated_text"],
+        hf_data["image"]["generated_text"],
         images=raw_image,
     )
-    preprocessor.num_vision_tokens_per_image = saved_num_tokens
+    gemma4_lm.preprocessor.num_vision_tokens_per_image = saved_num_tokens
 
-    if is_audio_model and hf_data_audio is not None:
+    # Audio
+    if capabilities["is_audio"] and "audio" in hf_data:
         _test_generate(
             "audio",
             gemma4_lm,
             PROMPT_AUDIO,
-            hf_data_audio["generated_text"],
+            hf_data["audio"]["generated_text"],
             audio=raw_audio,
         )
 
-    if is_video_model and hf_data_video is not None:
-        raw_video_sub = hf_data_video["raw_video_sub"]
-        hf_video_seq_len = hf_data_video["input_ids"].shape[1]
-        saved_num_frames_per_video = preprocessor.num_frames_per_video
-        saved_packer_seq_len = preprocessor.packer.sequence_length
-        preprocessor.num_frames_per_video = raw_video_sub.shape[0]
-        preprocessor.packer.sequence_length = hf_video_seq_len
-        _test_generate(
-            "video",
-            gemma4_lm,
-            PROMPT_VIDEO,
-            hf_data_video["generated_text"],
-            max_length=hf_video_seq_len + 64,
-            videos=raw_video_sub,
-        )
-        preprocessor.num_frames_per_video = saved_num_frames_per_video
-        preprocessor.packer.sequence_length = saved_packer_seq_len
+    # Video
+    if capabilities["is_video"] and "video" in hf_data:
+        raw_video_sub = hf_data["video"]["raw_video_sub"]
+        hf_video_seq_len = hf_data["video"]["input_ids"].shape[1]
+        with _temp_preprocessor_override(
+            gemma4_lm.preprocessor, raw_video_sub.shape[0], hf_video_seq_len
+        ):
+            _test_generate(
+                "video",
+                gemma4_lm,
+                PROMPT_VIDEO,
+                hf_data["video"]["generated_text"],
+                max_length=hf_video_seq_len + 64,
+                videos=raw_video_sub,
+            )
 
-    return gemma4_lm
+# ─── 3. STANDARD TEST API ────────────────────────────────────────────────────
+
+
+def test_tokenizer(
+    preprocessor,
+    tokenizer,
+    hf_data,
+    capabilities,
+    raw_image,
+    raw_audio,
+    raw_video,
+):
+    """Assert token ID parity across all modalities."""
+    print("\n--- Token ID Verification ---")
+
+    _test_token_ids(
+        "text", preprocessor, PROMPT_TEXT, hf_data["text"]["input_ids"]
+    )
+
+    # Patch num_vision_tokens_per_image
+    actual_num_tokens = int(
+        np.sum(
+            hf_data["image"]["input_ids"][0] == tokenizer.image_placeholder_id
+        )
+    )
+    saved_num_tokens = preprocessor.num_vision_tokens_per_image
+    preprocessor.num_vision_tokens_per_image = actual_num_tokens
+    _test_token_ids(
+        "image",
+        preprocessor,
+        PROMPT_IMAGE,
+        hf_data["image"]["input_ids"],
+        images=raw_image,
+    )
+    preprocessor.num_vision_tokens_per_image = saved_num_tokens
+
+    if capabilities["is_audio"] and "audio" in hf_data:
+        _test_token_ids(
+            "audio",
+            preprocessor,
+            PROMPT_AUDIO,
+            hf_data["audio"]["input_ids"],
+            audio=raw_audio,
+        )
+
+    if capabilities["is_video"] and "video" in hf_data:
+        raw_video_sub = hf_data["video"]["raw_video_sub"]
+        hf_video_seq_len = hf_data["video"]["input_ids"].shape[1]
+        with _temp_preprocessor_override(
+            preprocessor, raw_video_sub.shape[0], hf_video_seq_len + 1
+        ):
+            _test_token_ids(
+                "video",
+                preprocessor,
+                PROMPT_VIDEO,
+                hf_data["video"]["input_ids"],
+                videos=raw_video_sub,
+            )
+
+
+def test_model(
+    kh_model,
+    hf_data,
+    capabilities,
+    tokenizer,
+    preprocessor,
+    raw_image,
+    raw_audio,
+    raw_video,
+    target_model=None,
+):
+    """Run all verifications."""
+    if capabilities["is_assistant"]:
+        verify_assistant_mode(kh_model, hf_data["assistant"], target_model)
+        return
+        
+    # 1. Parameter count verification
+    kh_params = _count_keras_hub_params(kh_model.backbone)
+    hf_params = hf_data["text"]["param_count"]
+    np.testing.assert_equal(kh_params, hf_params)
+    print(f"✓ Parameter count match: {kh_params:,}")
+
+    # 2. Token ID verification
+    test_tokenizer(
+        preprocessor,
+        tokenizer,
+        hf_data,
+        capabilities,
+        raw_image,
+        raw_audio,
+        raw_video,
+    )
+    
+    print("\n--- Numerics Verification ---")
+    verify_text_modality(kh_model.backbone, preprocessor, hf_data["text"])
+    verify_image_modality(
+        kh_model.backbone, tokenizer, hf_data["image"], raw_image
+    )
+    if capabilities["is_audio"]:
+        verify_audio_modality(
+            kh_model.backbone, preprocessor, hf_data["audio"], raw_audio
+        )
+    if capabilities["is_video"]:
+        verify_video_modality(kh_model.backbone, preprocessor, hf_data["video"])
+        
+    if not FLAGS.skip_generate:
+        test_generation(
+            kh_model, hf_data, capabilities, raw_image, raw_audio, raw_video
+        )
 
 
 def _save_preset(
@@ -1244,6 +1152,9 @@ def _save_preset(
     print(f"-> Saved {save_dtype} preset to {preset_save_path}")
 
 
+# ─── 4. MAIN ORCHESTRATOR ───────────────────────────────────────────────────
+
+
 def main(_):
     preset = FLAGS.preset
 
@@ -1260,13 +1171,11 @@ def main(_):
 
     target_model = None
     if "assistant" in preset:
-        target_preset = preset.replace("_assistant", "")
-        print(
-            f"-> Detected assistant conversion. "
-            f"Preloading Target: {target_preset}"
-        )
+        target_hf_id = PRESET_MAP[preset].replace("-assistant", "")
+        target_hf_preset = f"hf://{target_hf_id}"
+        print(f"-> Preloading Target Model from HF: {target_hf_preset}")
         target_model = keras_hub.models.Gemma4CausalLM.from_preset(
-            target_preset
+            target_hf_preset
         )
 
     target_hidden_size = (
@@ -1282,54 +1191,83 @@ def main(_):
         is_video_model,
         final_logit_cap,
     ) = _load_hf_model(hf_preset)
-    hf_data_text, hf_data_image, hf_data_audio, hf_data_video = (
-        _precompute_all_hf_outputs(
-            hf_model,
-            hf_tokenizer,
-            processor,
-            raw_image,
-            raw_audio,
-            raw_video,
-            is_audio_model,
-            is_video_model,
-            skip_generate=FLAGS.skip_generate,
-            target_model=target_model,
-            hf_target_model=hf_target_model,
-        )
+    caps = get_model_capabilities(preset)
+    caps["is_audio"] = is_audio_model
+
+    hf_data = precompute_hf_outputs(
+        hf_model=hf_model,
+        hf_tokenizer=hf_tokenizer,
+        processor=processor,
+        raw_image=raw_image,
+        raw_audio=raw_audio,
+        raw_video=raw_video,
+        capabilities=caps,
+        skip_generate=FLAGS.skip_generate,
+        hf_target_model=hf_target_model,
     )
+
+    num_centroids = getattr(hf_model.config, "num_centroids", None)
+    centroid_intermediate_top_k = getattr(hf_model.config, "centroid_intermediate_top_k", None)
+    use_ordered_embeddings = getattr(hf_model.config, "use_ordered_embeddings", None)
+
     del hf_model
     if hf_target_model is not None:
         del hf_target_model
     gc.collect()
+    print("-> HF model cleared from memory.")
 
     backbone, tokenizer, preprocessor = _load_keras_hub_model(
         keras_hub_preset, is_audio_model
     )
 
-    gemma4_lm = _verify_model(
-        backbone,
-        tokenizer,
-        preprocessor,
-        hf_data_text,
-        hf_data_image,
-        hf_data_audio,
-        hf_data_video,
-        raw_image,
-        raw_audio,
-        raw_video,
-        is_audio_model,
-        is_video_model,
-        final_logit_cap,
+    if caps["is_assistant"]:
+        from keras_hub.src.models.gemma4.gemma4_assistant_causal_lm import (
+            Gemma4AssistantCausalLM,
+        )
+        from keras_hub.src.utils.transformers.convert_gemma4_assistant import (
+            convert_head as convert_assistant_head,
+        )
+        from keras_hub.src.utils.transformers.safetensor_utils import (
+            SafetensorLoader,
+        )
+
+        kh_model = Gemma4AssistantCausalLM(
+            backbone=backbone,
+            backbone_hidden_size=target_hidden_size,
+            num_centroids=num_centroids,
+            centroid_intermediate_top_k=centroid_intermediate_top_k,
+            use_ordered_embeddings=use_ordered_embeddings,
+        )
+        print("-> Loading assistant head weights...")
+        with SafetensorLoader(f"hf://{hf_preset}", prefix="") as loader:
+            convert_assistant_head(kh_model, loader, {})
+        print("-> Assistant head weights loaded.")
+    else:
+        kh_model = keras_hub.models.Gemma4CausalLM(
+            backbone=backbone,
+            preprocessor=preprocessor,
+            sampler="greedy",
+            final_logit_cap=final_logit_cap,
+        )
+
+    test_model(
+        kh_model=kh_model,
+        hf_data=hf_data,
+        capabilities=caps,
+        tokenizer=tokenizer,
+        preprocessor=preprocessor,
+        raw_image=raw_image,
+        raw_audio=raw_audio,
+        raw_video=raw_video,
         target_model=target_model,
     )
 
-    # Free all float32 model references before _save_preset loads bfloat16.
-    del hf_data_text, hf_data_image, hf_data_audio, hf_data_video
+    del hf_data
     del backbone, tokenizer, preprocessor
     gc.collect()
 
     _save_preset(
-        gemma4_lm,
+        kh_model,
         keras_hub_preset,
         preset,
         FLAGS.save_dtype,

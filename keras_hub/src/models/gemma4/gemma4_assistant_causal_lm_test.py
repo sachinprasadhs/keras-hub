@@ -46,7 +46,6 @@ class Gemma4AssistantTest(TestCase, parameterized.TestCase):
             use_ordered_embeddings=True,
         )
 
-
     def test_call_with_cache(self):
         batch_size = 2
         # Build a target-shaped KV cache that is compatible with the assistant

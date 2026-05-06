@@ -70,7 +70,6 @@ class Gemma4AssistantCausalLM(CausalLM):
         sampler="greedy",
         **kwargs,
     ):
-
         self.backbone_hidden_size = backbone_hidden_size
         self.num_centroids = num_centroids
         self.centroid_intermediate_top_k = centroid_intermediate_top_k
@@ -267,9 +266,13 @@ class Gemma4AssistantCausalLM(CausalLM):
             [last_token_embedding, last_hidden_state], axis=-1
         )
 
-        # Project to assistant hidden_size, then apply global scale.
+        # Project to assistant hidden_size.
+        # Note: last_token_embedding already carries the target model's
+        # embedding scale (sqrt(target_hidden_dim)), applied by the caller
+        # before this method.  No additional scale is applied here —
+        # HF's Gemma4AssistantForCausalLM.forward() also does not apply
+        # any extra scale after pre_projection.
         x = self.pre_projection(inputs_embeds)
-        x = x * ops.cast(ops.sqrt(self.backbone.hidden_dim), x.dtype)
 
         # Build shared_kv map from the target model's cache.
         # The target model's last 2 unique-type layers (second-to-last =

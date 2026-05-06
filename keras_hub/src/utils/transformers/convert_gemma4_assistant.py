@@ -5,6 +5,7 @@ from keras_hub.src.samplers.top_k_sampler import TopKSampler
 from keras_hub.src.samplers.top_p_sampler import TopPSampler
 from keras_hub.src.utils.transformers.convert_gemma4 import (
     _convert_decoder_block,
+    convert_tokenizer,
 )
 from keras_hub.src.utils.transformers.convert_gemma4 import (
     convert_backbone_config as target_convert_config,

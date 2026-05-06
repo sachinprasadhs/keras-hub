@@ -317,7 +317,10 @@ class Gemma4Backbone(Backbone):
                     _kv_source[j] = 1 if _is_g else 0
             else:
                 if layer_types is not None:
-                    _non_shared_types = layer_types[:_first_kv_shared]
+                    _non_shared_types = [
+                        "global" if t == "full_attention" else "local"
+                        for t in layer_types[:_first_kv_shared]
+                    ]
                 else:
                     _non_shared_types = [
                         "global"

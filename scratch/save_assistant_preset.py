@@ -196,9 +196,9 @@ def verify(assistant, hf_config):
     logits, next_hs = assistant.call_with_cache(
         dummy_embedding, dummy_hs, dummy_cache, 0
     )
-    print(
-        f"logits: {tuple(ops.shape(logits))}, next_hs: {tuple(ops.shape(next_hs))}"
-    )
+    logits_shape = tuple(ops.shape(logits))
+    hs_shape = tuple(ops.shape(next_hs))
+    print(f"logits: {logits_shape}, next_hs: {hs_shape}")
     assert tuple(ops.shape(logits)) == (1, 1, vocab_size)
     assert tuple(ops.shape(next_hs)) == (1, 1, backbone_hidden_size)
     print("Verification passed.")
@@ -231,9 +231,8 @@ def main():
         for f in sorted(files):
             path = os.path.join(root, f)
             size = os.path.getsize(path)
-            print(
-                f"  {os.path.relpath(path, args.output_dir):50s}  {size / 1e6:.1f} MB"
-            )
+            rel_path = os.path.relpath(path, args.output_dir)
+            print(f"  {rel_path:50s}  {size / 1e6:.1f} MB")
 
 
 if __name__ == "__main__":

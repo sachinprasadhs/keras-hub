@@ -4,6 +4,9 @@ os.environ["KERAS_BACKEND"] = "jax"
 
 import time
 
+import numpy as np
+import soundfile as sf
+
 from keras_hub.src.models.gemma4.gemma4_assistant_causal_lm import (
     Gemma4AssistantCausalLM,
 )
@@ -25,10 +28,13 @@ assistant_model = Gemma4AssistantCausalLM.from_preset(
 #     "What are the 3 main ingredients in a traditional margarita?"
 #     "<end_of_turn>\n<start_of_turn>model\n"
 # )
-import numpy as np
-import soundfile as sf
-
-AUDIO_FILE_PATH = "/usr/local/google/home/sachinprasad/Projects/KERAS-HUB/keras-hub/keras_hub/src/tests/test_data/audio_transcription_tests/male_short_voice_clip_3sec.wav"
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
+AUDIO_FILE_PATH = os.path.join(
+    _REPO_ROOT,
+    "keras_hub/src/tests/test_data/audio_transcription_tests/"
+    "male_short_voice_clip_3sec.wav",
+)
 
 try:
     raw_audio, sr = sf.read(AUDIO_FILE_PATH)
