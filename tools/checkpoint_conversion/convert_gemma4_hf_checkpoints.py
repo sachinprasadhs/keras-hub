@@ -628,7 +628,7 @@ def _load_hf_model(hf_preset):
     print(f"-> final_logit_softcapping: {final_logit_cap}")
 
     target_hidden_size = (
-        hf_target_model.config.hidden_size
+        hf_target_model.config.get_text_config().hidden_size
         if hf_target_model is not None
         else None
     )
