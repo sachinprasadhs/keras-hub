@@ -579,24 +579,24 @@ def _load_hf_model(hf_preset):
             hf_target_id,
             device_map="cpu",
             torch_dtype=torch.float32,
-            force_download=False,
+            force_download=True,
         )
         print(f"-> Loading HF Assistant Model: {hf_preset}")
         hf_model = AutoModelForCausalLM.from_pretrained(
             hf_preset,
             torch_dtype=torch.float32,
-            force_download=False,
+            force_download=True,
             low_cpu_mem_usage=False,
         )
     else:
         hf_model = AutoModelForMultimodalLM.from_pretrained(
             hf_preset,
             torch_dtype=torch.float32,
-            force_download=False,
+            force_download=True,
             low_cpu_mem_usage=False,
         )
     hf_tokenizer = AutoTokenizer.from_pretrained(
-        hf_preset, return_tensors="pt", force_download=False
+        hf_preset, return_tensors="pt", force_download=True
     )
     hf_model.eval()
     if hf_target_model is not None:
@@ -605,7 +605,7 @@ def _load_hf_model(hf_preset):
     processor = None
     if not is_assistant:
         processor = AutoProcessor.from_pretrained(
-            hf_preset, force_download=False
+            hf_preset, force_download=True
         )
     print("-> HuggingFace model(s) loaded.")
 
@@ -627,6 +627,12 @@ def _load_hf_model(hf_preset):
         )
     print(f"-> final_logit_softcapping: {final_logit_cap}")
 
+    target_hidden_size = (
+        hf_target_model.config.hidden_size
+        if hf_target_model is not None
+        else None
+    )
+
     return (
         hf_model,
         hf_target_model,
@@ -635,6 +641,7 @@ def _load_hf_model(hf_preset):
         is_audio_model,
         is_video_model,
         final_logit_cap,
+        target_hidden_size,
     )
 
 
@@ -1169,19 +1176,6 @@ def main(_):
 
     raw_image, raw_audio, raw_video = _load_test_assets()
 
-    target_model = None
-    if "assistant" in preset:
-        target_hf_id = PRESET_MAP[preset].replace("-assistant", "")
-        target_hf_preset = f"hf://{target_hf_id}"
-        print(f"-> Preloading Target Model from HF: {target_hf_preset}")
-        target_model = keras_hub.models.Gemma4CausalLM.from_preset(
-            target_hf_preset
-        )
-
-    target_hidden_size = (
-        target_model.backbone.hidden_dim if target_model is not None else None
-    )
-
     (
         hf_model,
         hf_target_model,
@@ -1190,6 +1184,7 @@ def main(_):
         is_audio_model,
         is_video_model,
         final_logit_cap,
+        target_hidden_size,
     ) = _load_hf_model(hf_preset)
     caps = get_model_capabilities(preset)
     caps["is_audio"] = is_audio_model
@@ -1248,6 +1243,14 @@ def main(_):
             preprocessor=preprocessor,
             sampler="greedy",
             final_logit_cap=final_logit_cap,
+        )
+
+    target_model = None
+    if caps["is_assistant"] and not FLAGS.skip_generate:
+        target_hf_id = PRESET_MAP[preset].replace("-assistant", "")
+        print(f"-> Loading KerasHub target model for generation check: hf://{target_hf_id}")
+        target_model = keras_hub.models.Gemma4CausalLM.from_preset(
+            f"hf://{target_hf_id}"
         )
 
     test_model(
