@@ -869,22 +869,32 @@ def _precompute_assistant_hf_outputs(
             output_hidden_states=True,
             return_shared_kv_states=True,
         )
-    hf_last_hs = target_out.hidden_states[-1].detach().numpy()
-    # shared_kv_states is a nested tuple of (key, value) pairs per layer.
+    # shared_kv_states is a dict {"full_attention": (k, v), "sliding_attention": (k, v)}.
     shared_kv_states = target_out.shared_kv_states
+    # last hidden state at the final token position: (batch, 1, target_hidden_size)
+    hf_last_hs = target_out.hidden_states[-1][:, -1:].detach().numpy()
 
-    # 2. Run assistant model with the shared KV states from the target.
+    # 2. Build inputs_embeds for the assistant:
+    #    inputs_embeds = cat([target_embed(last_token), last_hidden_state], dim=-1)
+    #    This mirrors candidate_generator.py line 1379.
+    last_token_id = input_ids[:, -1:]
+    with torch.no_grad():
+        last_token_embedding = hf_target_model.model.embed_tokens(last_token_id)
+        last_hidden_state_t = torch.from_numpy(hf_last_hs)
+        inputs_embeds = torch.cat([last_token_embedding, last_hidden_state_t], dim=-1)
+
+    # 3. Run assistant model with inputs_embeds + shared KV states.
     with torch.no_grad():
         assistant_out = hf_model(
-            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
             shared_kv_states=shared_kv_states,
         )
     hf_logits = assistant_out.logits.detach().numpy()
 
-    # 3. Count HF parameters (excluding buffers to match KH counting).
+    # 4. Count HF parameters (excluding buffers to match KH counting).
     hf_params = _count_hf_params(hf_model)
 
-    # 4. Optionally run HF speculative generation for a reference text.
+    # 5. Optionally run HF speculative generation for a reference text.
     hf_generated_text = None
     if not skip_generate:
         print("-> Running HF speculative generation (assistant) ...")
