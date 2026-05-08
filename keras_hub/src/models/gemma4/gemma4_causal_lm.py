@@ -743,22 +743,40 @@ class Gemma4CausalLM(CausalLM):
                 SpeculativeSampler,
             )
 
-            # Always use greedy acceptance for speculative decoding.
-            # The assistant's `sampler` attribute is for standalone generation
-            # only; stochastic rejection sampling with the centroid-limited
-            # assistant vocabulary causes garbage tokens because the residual
-            # distribution assigns non-active token probability back from the
-            # target.  HF's assisted generation also uses greedy acceptance.
-            base_sampler = None
+            # Save current (sampler, compiled graph) as a consistent pair so
+            # we can restore them after the speculative call without
+            # discarding either compiled graph.
             original_sampler = self.sampler
+            original_generate_function = self.generate_function
+
+            num_spec = getattr(assistant_model, "num_speculative_tokens", 5)
+
+            # Reuse a previously compiled speculative graph when the
+            # num_speculative_tokens matches, avoiding a full JIT recompile on
+            # every call.  Always use greedy acceptance (base_sampler=None):
+            # stochastic rejection sampling with the centroid-limited assistant
+            # vocabulary causes garbage tokens because the residual distribution
+            # leaks non-active token probability from the full-vocabulary target.
+            # HF's assisted generation also uses greedy acceptance.
+            cached_spec_sampler = getattr(self, "_cached_spec_sampler", None)
+            cached_spec_fn = getattr(self, "_cached_spec_generate_fn", None)
+
+            if (
+                cached_spec_sampler is not None
+                and cached_spec_sampler.num_speculative_tokens == num_spec
+            ):
+                # Hot path: reuse compiled speculative graph.
+                self.sampler = cached_spec_sampler
+                self.generate_function = cached_spec_fn
+            else:
+                # Cold path: compile a new speculative graph.
+                self.sampler = SpeculativeSampler(
+                    num_speculative_tokens=num_spec,
+                    base_sampler=None,
+                )
+                self.generate_function = None  # force recompile
+
             self._assistant_model = assistant_model
-            self.sampler = SpeculativeSampler(
-                num_speculative_tokens=getattr(
-                    assistant_model, "num_speculative_tokens", 5
-                ),
-                base_sampler=base_sampler,
-            )
-            self.generate_function = None
 
         outputs = super().generate(
             inputs,
@@ -768,8 +786,15 @@ class Gemma4CausalLM(CausalLM):
         )
 
         if assistant_model is not None:
+            # Cache the compiled speculative graph for future calls.
+            self._cached_spec_sampler = self.sampler
+            self._cached_spec_generate_fn = self.generate_function
+            # Restore the original (baseline) sampler + compiled graph.
+            # Do NOT set generate_function = None here — that would discard
+            # the baseline compiled graph and force a recompile on every
+            # subsequent non-speculative call.
             self._assistant_model = None
             self.sampler = original_sampler
-            self.generate_function = None
+            self.generate_function = original_generate_function
 
         return outputs

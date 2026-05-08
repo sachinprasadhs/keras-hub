@@ -68,18 +68,21 @@ def _format_prompt(text):
     return f"<start_of_turn>user\n{text}<end_of_turn>\n<start_of_turn>model\n"
 
 
-def _count_new_tokens(output_text, prompt):
-    """Estimate new tokens by stripping the prompt prefix."""
+def _count_new_tokens(output_text, prompt, tokenizer=None):
+    """Count new tokens generated after the prompt."""
     if isinstance(output_text, list):
         output_text = output_text[0]
     if output_text.startswith(prompt):
         output_text = output_text[len(prompt):]
-    # Rough word-based estimate; replace with tokenizer count if available.
+    if tokenizer is not None:
+        return len(tokenizer.tokenize(output_text))
+    # Fallback: rough word-based estimate.
     return len(output_text.split())
 
 
 def _run_generation(model, prompts, max_length, label):
     """Run generation `FLAGS.num_runs` times, return list of (seconds, tokens)."""
+    tokenizer = getattr(getattr(model, "preprocessor", None), "tokenizer", None)
     results = []
     print(f"\n[{label}] Warming up ...")
     # Warm-up (not timed).
@@ -91,7 +94,7 @@ def _run_generation(model, prompts, max_length, label):
         elapsed = time.perf_counter() - t0
 
         total_new = sum(
-            _count_new_tokens(out, p)
+            _count_new_tokens(out, p, tokenizer)
             for out, p in zip(outputs, prompts)
         )
         tps = total_new / elapsed
@@ -156,6 +159,7 @@ def main(_):
 
 def _run_generation_speculative(target_model, assistant_model, prompts, max_length):
     """Run speculative generation `FLAGS.num_runs` times."""
+    tokenizer = getattr(getattr(target_model, "preprocessor", None), "tokenizer", None)
     results = []
     print(f"\n[speculative decoding] Warming up ...")
     _ = target_model.generate(
@@ -174,7 +178,7 @@ def _run_generation_speculative(target_model, assistant_model, prompts, max_leng
         elapsed = time.perf_counter() - t0
 
         total_new = sum(
-            _count_new_tokens(out, p)
+            _count_new_tokens(out, p, tokenizer)
             for out, p in zip(outputs, prompts)
         )
         tps = total_new / elapsed
