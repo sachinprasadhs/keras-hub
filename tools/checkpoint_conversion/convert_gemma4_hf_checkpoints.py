@@ -696,9 +696,20 @@ def _load_hf_model(hf_preset):
         hf_tokenizer = AutoTokenizer.from_pretrained(
             target_preset, return_tensors="pt", force_download=False
         )
-        processor = None
-        is_audio_model = False
-        is_video_model = False
+        # Load the target's processor for multimodal generation comparisons.
+        # The assistant itself has no encoders, but speculative generation
+        # uses the target model's multimodal processing pipeline.
+        processor = AutoProcessor.from_pretrained(
+            target_preset, force_download=False
+        )
+        is_audio_model = (
+            hasattr(hf_target_model.config, "audio_config")
+            and hf_target_model.config.audio_config is not None
+        )
+        is_video_model = (
+            hasattr(processor, "video_processor")
+            and processor.video_processor is not None
+        )
         target_hidden_size = (
             hf_target_model.config.get_text_config().hidden_size
         )
@@ -848,14 +859,20 @@ def _precompute_assistant_hf_outputs(
     hf_target_model,
     hf_model,
     hf_tokenizer,
+    processor=None,
+    raw_image=None,
+    raw_audio=None,
+    raw_video=None,
+    is_audio_model=False,
+    is_video_model=False,
     skip_generate=False,
 ):
     """Run HF forward pass for the assistant preset and return verification
     data.
 
-    The assistant model does not have a vision encoder; verification is done
-    on a text-only input.  We run the *target* (full instruct) model first to
-    obtain the shared KV states that the assistant model consumes.
+    Runs the *target* model first to obtain shared KV states for the assistant
+    logit numerics check.  Then optionally runs HF speculative generation for
+    text, image, audio, and video prompts (matching the non-assistant path).
     """
     print("-> Precomputing HF assistant outputs ...")
 
@@ -905,17 +922,73 @@ def _precompute_assistant_hf_outputs(
     # 4. Count HF parameters (excluding buffers to match KH counting).
     hf_params = _count_hf_params(hf_model)
 
-    # 5. Optionally run HF speculative generation for a reference text.
+    # 5. Optionally run HF speculative generation for text, image, audio,
+    #    and video prompts (target model drives generation; assistant drafts).
     hf_generated_text = None
-    if not skip_generate:
-        print("-> Running HF speculative generation (assistant) ...")
+    hf_generated_image = None
+    hf_generated_audio = None
+    hf_generated_video = None
+    if not skip_generate and processor is not None:
+        def _speculative_generate(prompt, **media_kwargs):
+            """Run target+assistant speculative generation via processor."""
+            pv = media_kwargs.pop("raw_video", None)
+            if pv is not None and not isinstance(pv, torch.Tensor):
+                pv = torch.from_numpy(pv)
+            proc_inputs = processor(
+                text=prompt,
+                images=media_kwargs.get("raw_image"),
+                audio=media_kwargs.get("raw_audio"),
+                videos=pv,
+                return_tensors="pt",
+            )
+            prompt_len = proc_inputs["input_ids"].shape[1]
+            with torch.no_grad():
+                gen_ids = hf_target_model.generate(
+                    **proc_inputs,
+                    assistant_model=hf_model,
+                    max_new_tokens=64,
+                )
+            return hf_tokenizer.decode(
+                gen_ids[0, prompt_len:], skip_special_tokens=True
+            )
+
+        print("-> Running HF speculative generation (text) ...")
+        hf_generated_text = _speculative_generate(PROMPT_TEXT)
+        print(f"   text: {hf_generated_text!r}")
+
+        print("-> Running HF speculative generation (image) ...")
+        hf_generated_image = _speculative_generate(
+            PROMPT_IMAGE, raw_image=raw_image
+        )
+        print(f"   image: {hf_generated_image!r}")
+
+        if is_audio_model and raw_audio is not None:
+            print("-> Running HF speculative generation (audio) ...")
+            hf_generated_audio = _speculative_generate(
+                PROMPT_AUDIO, raw_audio=raw_audio
+            )
+            print(f"   audio: {hf_generated_audio!r}")
+
+        if is_video_model and raw_video is not None:
+            print("-> Running HF speculative generation (video) ...")
+            if not isinstance(raw_video, np.ndarray):
+                raw_video = np.array(raw_video)
+            # HF expects channels-first (T, C, H, W).
+            raw_video_hf = np.transpose(raw_video, (0, 3, 1, 2))
+            hf_generated_video = _speculative_generate(
+                PROMPT_VIDEO, raw_video=raw_video_hf
+            )
+            print(f"   video: {hf_generated_video!r}")
+    elif not skip_generate:
+        # Fallback: text-only with bare tokenizer (no processor available).
+        print("-> Running HF speculative generation (text only, no processor) ...")
         gen_ids = hf_target_model.generate(
             input_ids,
             assistant_model=hf_model,
             max_new_tokens=64,
         )
         hf_generated_text = hf_tokenizer.decode(
-            gen_ids[0], skip_special_tokens=True
+            gen_ids[0, input_ids.shape[1]:], skip_special_tokens=True
         )
         print(f"   HF generated: {hf_generated_text!r}")
 
@@ -926,6 +999,9 @@ def _precompute_assistant_hf_outputs(
         "input_ids": input_ids.numpy(),
         "shared_kv_states": shared_kv_states,
         "generated_text": hf_generated_text,
+        "generated_image": hf_generated_image,
+        "generated_audio": hf_generated_audio,
+        "generated_video": hf_generated_video,
         "param_count": hf_params,
     }
 
@@ -943,15 +1019,23 @@ def _count_keras_hub_assistant_params(kh_assistant):
 
 
 def _verify_assistant_mode(
-    kh_assistant, hf_data, hf_tokenizer, keras_hub_target_preset=None, skip_generate=False
+    kh_assistant,
+    hf_data,
+    hf_tokenizer,
+    keras_hub_target_preset=None,
+    skip_generate=False,
+    raw_image=None,
+    raw_audio=None,
+    raw_video=None,
+    is_audio_model=False,
+    is_video_model=False,
 ):
     """Verify a Gemma4AssistantCausalLM against pre-computed HF outputs.
 
     Checks:
       1. Parameter count match with HF.
       2. Logit numerics on finite positions (atol=1e-3, rtol=1e-3).
-      3. Speculative generation comparison (if keras_hub_target_preset given
-         and skip_generate is False).
+      3. Speculative generation comparison for text, image, audio, and video.
     """
     print("\n--- Section 1: Parameter count ---")
     kh_params = _count_keras_hub_assistant_params(kh_assistant)
@@ -1042,8 +1126,6 @@ def _verify_assistant_mode(
     )
     print("✓ Logits within tolerance (atol=1e-3, rtol=1e-3).")
 
-    print("✓ Logits within tolerance (atol=1e-3, rtol=1e-3).")
-
     # ── Section 3: Speculative generation comparison ────────────────────────
     if skip_generate or keras_hub_target_preset is None:
         print(
@@ -1052,28 +1134,51 @@ def _verify_assistant_mode(
         )
     else:
         print("\n--- Section 3: Speculative generation ---")
-        hf_generated_text = hf_data.get("generated_text") or "(not available)"
 
-        # Load the KH target model and run speculative generation.
+        # Load the KH target model once for all modality comparisons.
         kh_target = keras_hub.models.Gemma4CausalLM.from_preset(
             keras_hub_target_preset, dtype="float32"
-        )
-        tokenizer = keras_hub.models.Gemma4Tokenizer.from_preset(
-            keras_hub_target_preset
         )
         preprocessor = keras_hub.models.Gemma4CausalLMPreprocessor.from_preset(
             keras_hub_target_preset
         )
-        preprocessor.audio_converter = None
+        if not is_audio_model:
+            preprocessor.audio_converter = None
         kh_target.preprocessor = preprocessor
 
         _test_generate(
-            "assistant-speculative",
+            "assistant-speculative-text",
             kh_target,
             PROMPT_TEXT,
-            hf_generated_text,
+            hf_data.get("generated_text") or "(not available)",
             assistant_model=kh_assistant,
         )
+        _test_generate(
+            "assistant-speculative-image",
+            kh_target,
+            PROMPT_IMAGE,
+            hf_data.get("generated_image") or "(not available)",
+            assistant_model=kh_assistant,
+            images=raw_image,
+        )
+        if is_audio_model and raw_audio is not None:
+            _test_generate(
+                "assistant-speculative-audio",
+                kh_target,
+                PROMPT_AUDIO,
+                hf_data.get("generated_audio") or "(not available)",
+                assistant_model=kh_assistant,
+                audio=raw_audio,
+            )
+        if is_video_model and raw_video is not None:
+            _test_generate(
+                "assistant-speculative-video",
+                kh_target,
+                PROMPT_VIDEO,
+                hf_data.get("generated_video") or "(not available)",
+                assistant_model=kh_assistant,
+                videos=raw_video,
+            )
         del kh_target
 
     print("\n✓ Assistant verification complete.")
@@ -1409,6 +1514,12 @@ def main(_):
             hf_target_model,
             hf_model,
             hf_tokenizer,
+            processor=processor,
+            raw_image=raw_image,
+            raw_audio=raw_audio,
+            raw_video=raw_video,
+            is_audio_model=is_audio_model,
+            is_video_model=is_video_model,
             skip_generate=FLAGS.skip_generate,
         )
         del hf_target_model, hf_model
@@ -1427,6 +1538,11 @@ def main(_):
             hf_tokenizer,
             keras_hub_target_preset=keras_hub_preset,
             skip_generate=FLAGS.skip_generate,
+            raw_image=raw_image,
+            raw_audio=raw_audio,
+            raw_video=raw_video,
+            is_audio_model=is_audio_model,
+            is_video_model=is_video_model,
         )
 
         del hf_data_assistant
