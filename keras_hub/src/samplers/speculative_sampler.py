@@ -137,9 +137,10 @@ class SpeculativeSampler(Sampler):
                 logits, _, current_draft_cache = draft_next(
                     current_prompt, current_draft_cache, safe_idx
                 )
-                # (batch, vocab) — use compute_probabilities so temperature
-                # is applied consistently with the base sampler, and q_probs
-                # reflects the distribution actually used for sampling.
+                # Apply temperature only to get q_probs.  Draft tokens are
+                # sampled from this same distribution so q_probs[x] equals
+                # the probability actually used, which is required for the
+                # rejection-sampling acceptance ratio p(x)/q(x).
                 if self.base_sampler is not None:
                     dt = getattr(self.base_sampler, "temperature", 1.0)
                     probs = ops.softmax(
@@ -149,8 +150,22 @@ class SpeculativeSampler(Sampler):
                     probs = self.compute_probabilities(logits)
 
                 if self.base_sampler is not None:
-                    # Sample according to the base sampler's distribution.
-                    next_token = self.base_sampler.get_next_token(probs)
+                    # Stochastic draft: sample from temperature-scaled
+                    # multinomial so q_probs stays consistent with sampling.
+                    next_token = ops.cast(
+                        ops.squeeze(
+                            random.categorical(
+                                ops.cast(
+                                    ops.log(probs + ops.cast(1e-10, probs.dtype)),
+                                    "float32",
+                                ),
+                                1,
+                                seed=self.seed_generator,
+                            ),
+                            axis=-1,
+                        ),
+                        prompt.dtype,
+                    )
                 else:
                     next_token = ops.argmax(probs, axis=-1)
 
