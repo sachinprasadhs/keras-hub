@@ -959,12 +959,31 @@ def _verify_assistant_mode(kh_assistant, hf_data, hf_tokenizer):
     # KH cache shape:     (batch, 2, seq_len, num_heads, head_dim)
     #   where [:, 0, ...] = key, [:, 1, ...] = value.
     def _hf_kv_to_kh(k_t, v_t):
-        k = np.transpose(k_t.detach().numpy(), (0, 2, 1, 3))  # heads→seq
+        k = np.transpose(k_t.detach().numpy(), (0, 2, 1, 3))  # → (batch, seq, heads, dim)
         v = np.transpose(v_t.detach().numpy(), (0, 2, 1, 3))
         return np.stack([k, v], axis=1)  # (batch, 2, seq, heads, dim)
 
     sliding_kv = _hf_kv_to_kh(*shared_kv_states["sliding_attention"])
     full_kv = _hf_kv_to_kh(*shared_kv_states["full_attention"])
+
+    # Pad to a common shape before stacking.  KH allocates all per-layer
+    # cache slots with max_head_dim = max(head_dim, global_head_dim) and
+    # max_num_kv_heads so ops.stack() works across heterogeneous layers.
+    # Mirror that padding here: zeros fill unused head/dim slots and are
+    # masked out when KH slices back to the actual head_dim/num_heads.
+    max_seq = max(sliding_kv.shape[2], full_kv.shape[2])
+    max_heads = max(sliding_kv.shape[3], full_kv.shape[3])
+    max_dim = max(sliding_kv.shape[4], full_kv.shape[4])
+
+    def _pad_kv(kv, t_seq, t_heads, t_dim):
+        _, _, s, h, d = kv.shape
+        return np.pad(
+            kv, [(0, 0), (0, 0), (0, t_seq - s), (0, t_heads - h), (0, t_dim - d)]
+        )
+
+    sliding_kv = _pad_kv(sliding_kv, max_seq, max_heads, max_dim)
+    full_kv = _pad_kv(full_kv, max_seq, max_heads, max_dim)
+
     # Stack as 2-layer target_cache: [0]=sliding, [1]=full.
     # call_with_cache uses target_cache[:, num_target-2, ...] for sliding and
     # target_cache[:, num_target-1, ...] for full, so 2 layers is sufficient.
