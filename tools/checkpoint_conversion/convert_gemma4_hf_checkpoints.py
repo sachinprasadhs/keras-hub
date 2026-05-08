@@ -879,7 +879,7 @@ def _precompute_assistant_hf_outputs(
     #    This mirrors candidate_generator.py line 1379.
     last_token_id = input_ids[:, -1:]
     with torch.no_grad():
-        last_token_embedding = hf_target_model.model.embed_tokens(last_token_id)
+        last_token_embedding = hf_target_model.get_input_embeddings()(last_token_id)
         last_hidden_state_t = torch.from_numpy(hf_last_hs)
         inputs_embeds = torch.cat([last_token_embedding, last_hidden_state_t], dim=-1)
 
