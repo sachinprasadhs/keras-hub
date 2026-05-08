@@ -341,7 +341,6 @@ def _precompute_hf_outputs(
             generated_ids = hf_model.generate(
                 **hf_inputs,
                 max_new_tokens=64,
-                do_sample=False,
             )
         prompt_length = hf_inputs["input_ids"].shape[1]
         hf_generated_text = hf_tokenizer.decode(
@@ -929,7 +928,7 @@ def _precompute_assistant_hf_outputs(
     hf_generated_audio = None
     hf_generated_video = None
     if not skip_generate and processor is not None:
-        def _speculative_generate(prompt, **media_kwargs):
+        def _speculative_generate(prompt, max_new_tokens=64, **media_kwargs):
             """Run target+assistant speculative generation via processor."""
             pv = media_kwargs.pop("raw_video", None)
             if pv is not None and not isinstance(pv, torch.Tensor):
@@ -941,12 +940,30 @@ def _precompute_assistant_hf_outputs(
                 videos=pv,
                 return_tensors="pt",
             )
+            # Ensure BOS token is present (mirrors _precompute_hf_outputs).
+            bos_id = hf_tokenizer.bos_token_id
+            if (
+                bos_id is not None
+                and proc_inputs["input_ids"][0, 0].item() != bos_id
+            ):
+                bos = torch.full(
+                    (proc_inputs["input_ids"].shape[0], 1),
+                    bos_id,
+                    dtype=proc_inputs["input_ids"].dtype,
+                )
+                proc_inputs["input_ids"] = torch.cat(
+                    [bos, proc_inputs["input_ids"]], dim=1
+                )
+                if "attention_mask" in proc_inputs:
+                    proc_inputs["attention_mask"] = torch.ones_like(
+                        proc_inputs["input_ids"]
+                    )
             prompt_len = proc_inputs["input_ids"].shape[1]
             with torch.no_grad():
                 gen_ids = hf_target_model.generate(
                     **proc_inputs,
                     assistant_model=hf_model,
-                    max_new_tokens=64,
+                    max_new_tokens=max_new_tokens,
                 )
             return hf_tokenizer.decode(
                 gen_ids[0, prompt_len:], skip_special_tokens=True
@@ -958,7 +975,7 @@ def _precompute_assistant_hf_outputs(
 
         print("-> Running HF speculative generation (image) ...")
         hf_generated_image = _speculative_generate(
-            PROMPT_IMAGE, raw_image=raw_image
+            PROMPT_IMAGE, max_new_tokens=256, raw_image=raw_image
         )
         print(f"   image: {hf_generated_image!r}")
 
@@ -976,7 +993,7 @@ def _precompute_assistant_hf_outputs(
             # HF expects channels-first (T, C, H, W).
             raw_video_hf = np.transpose(raw_video, (0, 3, 1, 2))
             hf_generated_video = _speculative_generate(
-                PROMPT_VIDEO, raw_video=raw_video_hf
+                PROMPT_VIDEO, max_new_tokens=256, raw_video=raw_video_hf
             )
             print(f"   video: {hf_generated_video!r}")
     elif not skip_generate:
