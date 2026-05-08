@@ -616,8 +616,13 @@ class Gemma4CausalLM(CausalLM):
                     target_cache=cur_target_cache,
                     cache_update_index=index - 1,
                 )
+                # Apply the same final logit soft-cap as the target model so
+                # that q_probs and p_probs (verify_next) are on the same scale
+                # for the rejection-sampling acceptance ratio p(x)/q(x).
+                if self.final_logit_cap is not None:
+                    cap = ops.cast(self.final_logit_cap, logits.dtype)
+                    logits = ops.tanh(logits / cap) * cap
                 # logits: (batch, 1, vocab) → squeeze to (batch, vocab)
-                # Pass next_hidden and the unchanged target cache forward.
                 return (
                     ops.squeeze(logits, axis=1),
                     next_hidden,
