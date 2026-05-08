@@ -927,17 +927,21 @@ def _precompute_assistant_hf_outputs(
     hf_generated_image = None
     hf_generated_audio = None
     hf_generated_video = None
+    # Metadata captured during _speculative_generate for KH alignment.
+    _gen_meta = {}
     if not skip_generate and processor is not None:
         def _speculative_generate(prompt, max_new_tokens=64, **media_kwargs):
             """Run target+assistant speculative generation via processor."""
             pv = media_kwargs.pop("raw_video", None)
+            ri = media_kwargs.get("raw_image")
             if pv is not None and not isinstance(pv, torch.Tensor):
                 pv = torch.from_numpy(pv)
             proc_inputs = processor(
                 text=prompt,
-                images=media_kwargs.get("raw_image"),
+                images=ri,
                 audio=media_kwargs.get("raw_audio"),
                 videos=pv,
+                return_mm_token_type_ids=True,
                 return_tensors="pt",
             )
             # Ensure BOS token is present (mirrors _precompute_hf_outputs).
@@ -959,6 +963,17 @@ def _precompute_assistant_hf_outputs(
                         proc_inputs["input_ids"]
                     )
             prompt_len = proc_inputs["input_ids"].shape[1]
+            # Capture metadata for KH preprocessor alignment.
+            if ri is not None and "mm_token_type_ids" in proc_inputs:
+                _gen_meta["image_token_count"] = int(
+                    (proc_inputs["mm_token_type_ids"] == 1).sum()
+                )
+            if pv is not None:
+                _gen_meta["video_prompt_len"] = prompt_len
+                if "pixel_values_videos" in proc_inputs:
+                    _gen_meta["video_num_frames"] = int(
+                        proc_inputs["pixel_values_videos"].shape[1]
+                    )
             with torch.no_grad():
                 gen_ids = hf_target_model.generate(
                     **proc_inputs,
@@ -986,12 +1001,26 @@ def _precompute_assistant_hf_outputs(
             )
             print(f"   audio: {hf_generated_audio!r}")
 
+        raw_video_sub = None
         if is_video_model and raw_video is not None:
             print("-> Running HF speculative generation (video) ...")
             if not isinstance(raw_video, np.ndarray):
                 raw_video = np.array(raw_video)
+            # Subsample to processor's expected frame count so that KH gets
+            # the same frames (mirrors _precompute_all_hf_outputs).
+            hf_num_frames = getattr(
+                processor.video_processor, "num_frames", 32
+            )
+            T = raw_video.shape[0]
+            if T > hf_num_frames:
+                sub_idx = np.arange(0, T, T / hf_num_frames).astype(int)[
+                    :hf_num_frames
+                ]
+                raw_video_sub = raw_video[sub_idx]  # channels-last
+            else:
+                raw_video_sub = raw_video
             # HF expects channels-first (T, C, H, W).
-            raw_video_hf = np.transpose(raw_video, (0, 3, 1, 2))
+            raw_video_hf = np.transpose(raw_video_sub, (0, 3, 1, 2))
             hf_generated_video = _speculative_generate(
                 PROMPT_VIDEO, max_new_tokens=256, raw_video=raw_video_hf
             )
@@ -1019,6 +1048,10 @@ def _precompute_assistant_hf_outputs(
         "generated_image": hf_generated_image,
         "generated_audio": hf_generated_audio,
         "generated_video": hf_generated_video,
+        "image_token_count": _gen_meta.get("image_token_count"),
+        "video_prompt_len": _gen_meta.get("video_prompt_len"),
+        "video_num_frames": _gen_meta.get("video_num_frames"),
+        "raw_video_sub": raw_video_sub if not skip_generate else None,
         "param_count": hf_params,
     }
 
@@ -1170,6 +1203,10 @@ def _verify_assistant_mode(
             hf_data.get("generated_text") or "(not available)",
             assistant_model=kh_assistant,
         )
+        image_token_count = hf_data.get("image_token_count")
+        saved_nv = preprocessor.num_vision_tokens_per_image
+        if image_token_count:
+            preprocessor.num_vision_tokens_per_image = image_token_count
         _test_generate(
             "assistant-speculative-image",
             kh_target,
@@ -1178,6 +1215,8 @@ def _verify_assistant_mode(
             assistant_model=kh_assistant,
             images=raw_image,
         )
+        preprocessor.num_vision_tokens_per_image = saved_nv
+
         if is_audio_model and raw_audio is not None:
             _test_generate(
                 "assistant-speculative-audio",
@@ -1188,14 +1227,25 @@ def _verify_assistant_mode(
                 audio=raw_audio,
             )
         if is_video_model and raw_video is not None:
+            raw_video_kh = hf_data.get("raw_video_sub") or raw_video
+            video_prompt_len = hf_data.get("video_prompt_len") or 2048
+            video_num_frames = hf_data.get("video_num_frames")
+            saved_nf = preprocessor.num_frames_per_video
+            saved_sl = preprocessor.packer.sequence_length
+            if video_num_frames:
+                preprocessor.num_frames_per_video = video_num_frames
+            preprocessor.packer.sequence_length = video_prompt_len
             _test_generate(
                 "assistant-speculative-video",
                 kh_target,
                 PROMPT_VIDEO,
                 hf_data.get("generated_video") or "(not available)",
+                max_length=video_prompt_len + 256,
                 assistant_model=kh_assistant,
-                videos=raw_video,
+                videos=raw_video_kh,
             )
+            preprocessor.num_frames_per_video = saved_nf
+            preprocessor.packer.sequence_length = saved_sl
         del kh_target
 
     print("\n✓ Assistant verification complete.")
