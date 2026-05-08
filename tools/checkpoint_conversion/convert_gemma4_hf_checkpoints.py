@@ -911,6 +911,7 @@ def _precompute_assistant_hf_outputs(
     return {
         "logits": hf_logits,
         "last_hidden_state": hf_last_hs,
+        "last_token_embedding": last_token_embedding.detach().numpy(),
         "input_ids": input_ids.numpy(),
         "shared_kv_states": shared_kv_states,
         "generated_text": hf_generated_text,
@@ -947,29 +948,48 @@ def _verify_assistant_mode(kh_assistant, hf_data, hf_tokenizer):
     print("✓ Parameter counts match.")
 
     print("\n--- Section 2: Logit numerics ---")
-    input_ids = hf_data["input_ids"]  # (1, seq_len) numpy array
-    shared_kv_states = hf_data["shared_kv_states"]
-    hf_logits = hf_data["logits"]  # (1, seq_len, vocab)
+    input_ids = hf_data["input_ids"]  # (1, seq_len) numpy
+    shared_kv_states = hf_data["shared_kv_states"]  # dict[str, tuple[Tensor,Tensor]]
+    hf_logits = hf_data["logits"]  # (1, 1, vocab) — single assistant token
+    last_hidden_state_np = hf_data["last_hidden_state"]  # (1, 1, target_hidden)
+    last_token_embedding_np = hf_data["last_token_embedding"]  # (1, 1, target_hidden)
 
-    # Build KH inputs: token_ids and padding_mask.
-    kh_token_ids = ops.convert_to_tensor(input_ids, dtype="int32")
-    kh_padding_mask = ops.ones_like(kh_token_ids, dtype="bool")
+    # Convert HF shared_kv_states to KH target_cache format.
+    # HF key/value shape: (batch, num_heads, seq_len, head_dim)
+    # KH cache shape:     (batch, 2, seq_len, num_heads, head_dim)
+    #   where [:, 0, ...] = key, [:, 1, ...] = value.
+    def _hf_kv_to_kh(k_t, v_t):
+        k = np.transpose(k_t.detach().numpy(), (0, 2, 1, 3))  # heads→seq
+        v = np.transpose(v_t.detach().numpy(), (0, 2, 1, 3))
+        return np.stack([k, v], axis=1)  # (batch, 2, seq, heads, dim)
 
-    # Convert shared_kv_states to KH-compatible format.  Each element is a
-    # pair (key, value) as torch tensors; convert to numpy arrays.
-    kh_shared_kv = [
-        (k.detach().numpy(), v.detach().numpy()) for (k, v) in shared_kv_states
-    ]
+    sliding_kv = _hf_kv_to_kh(*shared_kv_states["sliding_attention"])
+    full_kv = _hf_kv_to_kh(*shared_kv_states["full_attention"])
+    # Stack as 2-layer target_cache: [0]=sliding, [1]=full.
+    # call_with_cache uses target_cache[:, num_target-2, ...] for sliding and
+    # target_cache[:, num_target-1, ...] for full, so 2 layers is sufficient.
+    target_cache_np = np.stack([sliding_kv, full_kv], axis=1)
 
-    with torch.no_grad():
-        kh_out = kh_assistant(
-            {
-                "token_ids": kh_token_ids,
-                "padding_mask": kh_padding_mask,
-                "shared_kv_states": kh_shared_kv,
-            }
-        )
-    kh_logits = ops.convert_to_numpy(kh_out)
+    seq_len = input_ids.shape[1]
+    last_token_embedding_t = ops.convert_to_tensor(
+        last_token_embedding_np, dtype=kh_assistant.compute_dtype
+    )
+    last_hidden_state_t = ops.convert_to_tensor(
+        last_hidden_state_np, dtype=kh_assistant.compute_dtype
+    )
+    target_cache_t = ops.convert_to_tensor(
+        target_cache_np, dtype=kh_assistant.compute_dtype
+    )
+    padding_mask_t = ops.ones((1, 1), dtype="bool")
+
+    kh_out = kh_assistant.call_with_cache(
+        last_token_embedding_t,
+        last_hidden_state_t,
+        target_cache_t,
+        cache_update_index=seq_len - 1,
+        padding_mask=padding_mask_t,
+    )
+    kh_logits = ops.convert_to_numpy(kh_out[0])
 
     # Compare only on finite positions (sparse vocabulary logits may have
     # -inf for disabled tokens).
