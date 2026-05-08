@@ -1,6 +1,5 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoModelForMultimodalLM, AutoTokenizer
-from transformers.cache_utils import DynamicCache
+from transformers import AutoModelForMultimodalLM
 
 # Load models (use CPU to avoid GPU issues)
 device = torch.device("cpu")
@@ -22,4 +21,9 @@ print("Running target model...")
 target_out = target_model(inputs, use_cache=True, output_hidden_states=True)
 
 print("Type of past_key_values:", type(target_out.past_key_values))
-print("Type of past_key_values.layers:", type(target_out.past_key_values.layers) if hasattr(target_out.past_key_values, "layers") else "No layers attribute")
+print(
+    "Type of past_key_values.layers:",
+    type(target_out.past_key_values.layers)
+    if hasattr(target_out.past_key_values, "layers")
+    else "No layers attribute",
+)

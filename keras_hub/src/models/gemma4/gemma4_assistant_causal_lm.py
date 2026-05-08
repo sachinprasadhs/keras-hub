@@ -39,6 +39,9 @@ class Gemma4AssistantCausalLM(CausalLM):
             this for a standard output head. Defaults to `True`.
         sampler: A `keras_hub.samplers.Sampler` instance or string. The
             sampling strategy. Defaults to `"greedy"`.
+        num_speculative_tokens: int. Number of draft tokens proposed per
+            speculative decoding step. Passed to `SpeculativeSampler` by
+            the target model's `generate()`. Defaults to `5`.
 
     Examples:
     ```python
@@ -67,6 +70,7 @@ class Gemma4AssistantCausalLM(CausalLM):
         num_centroids,
         centroid_intermediate_top_k,
         use_ordered_embeddings,
+        num_speculative_tokens=5,
         sampler="greedy",
         **kwargs,
     ):
@@ -74,6 +78,7 @@ class Gemma4AssistantCausalLM(CausalLM):
         self.num_centroids = num_centroids
         self.centroid_intermediate_top_k = centroid_intermediate_top_k
         self.use_ordered_embeddings = use_ordered_embeddings
+        self.num_speculative_tokens = num_speculative_tokens
         # Set backbone before super().__init__() so the
         # parent class finds self._backbone immediately.
         self.backbone = backbone
@@ -345,6 +350,21 @@ class Gemma4AssistantCausalLM(CausalLM):
                     self.centroid_intermediate_top_k
                 ),
                 "use_ordered_embeddings": self.use_ordered_embeddings,
+                "num_speculative_tokens": self.num_speculative_tokens,
+                "sampler": self._serialize_sampler(),
             }
         )
         return config
+
+    def _serialize_sampler(self):
+        from keras_hub.src.samplers.serialization import serialize
+
+        return serialize(self.sampler)
+
+    @classmethod
+    def from_config(cls, config):
+        if "sampler" in config and isinstance(config["sampler"], dict):
+            from keras_hub.src.samplers.serialization import deserialize
+
+            config["sampler"] = deserialize(config["sampler"])
+        return super().from_config(config)

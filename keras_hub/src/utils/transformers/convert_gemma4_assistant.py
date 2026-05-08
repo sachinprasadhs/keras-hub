@@ -3,9 +3,10 @@ import numpy as np
 from keras_hub.src.models.gemma4.gemma4_backbone import Gemma4Backbone
 from keras_hub.src.samplers.top_k_sampler import TopKSampler
 from keras_hub.src.samplers.top_p_sampler import TopPSampler
+from keras_hub.src.utils.preset_utils import check_file_exists
+from keras_hub.src.utils.preset_utils import load_json
 from keras_hub.src.utils.transformers.convert_gemma4 import (
     _convert_decoder_block,
-    convert_tokenizer,
 )
 from keras_hub.src.utils.transformers.convert_gemma4 import (
     convert_backbone_config as target_convert_config,
@@ -27,7 +28,7 @@ def convert_backbone_config(transformers_config):
 
 
 def convert_task_config(transformers_config):
-    """Map Transformers config to Gemma4AssistantCausalLM kwargs."""
+    """Map Transformers config.json to Gemma4AssistantCausalLM kwargs."""
     return {
         "centroid_intermediate_top_k": transformers_config[
             "centroid_intermediate_top_k"
@@ -38,39 +39,39 @@ def convert_task_config(transformers_config):
     }
 
 
-def convert_sampler_config(generation_config):
-    """Map a HF generation_config dict to a Keras Hub Sampler instance.
+def load_task_config(preset, transformers_config):
+    """Read generation_config.json and return extra Gemma4AssistantCausalLM
+    kwargs not present in config.json.
 
-    HF fields and their Keras Hub mapping:
-      do_sample    → if False, returns "greedy"
-      top_k + top_p → TopPSampler(p=top_p, k=top_k, temperature=temperature)
-      top_k only   → TopKSampler(k=top_k, temperature=temperature)
-      temperature  → passed to whichever sampler is chosen
+    Maps:
+      ``num_assistant_tokens`` → ``num_speculative_tokens``
+      ``do_sample`` / ``top_k`` / ``top_p`` / ``temperature`` → ``sampler``
     """
-    do_sample = generation_config.get("do_sample", False)
-    has_top_k = "top_k" in generation_config
-    has_top_p = "top_p" in generation_config
+    if not check_file_exists(preset, "generation_config.json"):
+        return {}
+    gen_cfg = load_json(preset, "generation_config.json")
+    kwargs = {}
+
+    if "num_assistant_tokens" in gen_cfg:
+        kwargs["num_speculative_tokens"] = gen_cfg["num_assistant_tokens"]
+
+    do_sample = gen_cfg.get("do_sample", False)
+    has_top_k = "top_k" in gen_cfg
+    has_top_p = "top_p" in gen_cfg
     if not do_sample and (has_top_k or has_top_p):
         do_sample = True
-
     if do_sample:
-        top_k = generation_config.get("top_k", None)
-        top_p = generation_config.get("top_p", None)
-        temperature = generation_config.get("temperature", 1.0)
-        # When both top_p and top_k are set, use TopPSampler with k as a
-        # pre-filter (this is the standard nucleus + top-k combination).
+        top_k = gen_cfg.get("top_k", None)
+        top_p = gen_cfg.get("top_p", None)
+        temperature = gen_cfg.get("temperature", 1.0)
         if top_p is not None and top_p < 1.0:
-            return TopPSampler(
-                p=top_p,
-                k=top_k,
-                temperature=temperature,
+            kwargs["sampler"] = TopPSampler(
+                p=top_p, k=top_k, temperature=temperature
             )
-        if top_k is not None:
-            return TopKSampler(
-                k=top_k,
-                temperature=temperature,
-            )
-    return "greedy"
+        elif top_k is not None:
+            kwargs["sampler"] = TopKSampler(k=top_k, temperature=temperature)
+
+    return kwargs
 
 
 def convert_weights(backbone, loader, transformers_config):

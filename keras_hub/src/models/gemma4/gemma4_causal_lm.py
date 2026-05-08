@@ -750,7 +750,10 @@ class Gemma4CausalLM(CausalLM):
             original_sampler = self.sampler
             self._assistant_model = assistant_model
             self.sampler = SpeculativeSampler(
-                num_speculative_tokens=5, base_sampler=base_sampler
+                num_speculative_tokens=getattr(
+                    assistant_model, "num_speculative_tokens", 5
+                ),
+                base_sampler=base_sampler,
             )
             self.generate_function = None
 

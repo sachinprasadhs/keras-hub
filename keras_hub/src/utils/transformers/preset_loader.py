@@ -139,6 +139,11 @@ class TransformersPresetLoader(PresetLoader):
             task_config = self.converter.convert_task_config(self.config)
             kwargs = {**task_config, **kwargs}
 
+        if hasattr(self.converter, "load_task_config"):
+            extra = self.converter.load_task_config(self.preset, self.config)
+            if extra:
+                kwargs = {**extra, **kwargs}
+
         if not load_task_weights or (
             not is_classifier
             and not is_assistant
@@ -154,18 +159,6 @@ class TransformersPresetLoader(PresetLoader):
         if load_task_weights:
             with SafetensorLoader(self.preset, prefix="") as loader:
                 self.converter.convert_head(task, loader, self.config)
-        if hasattr(self.converter, "convert_sampler_config"):
-            from keras_hub.src.utils.preset_utils import check_file_exists
-            from keras_hub.src.utils.preset_utils import get_file
-
-            if check_file_exists(self.preset, "generation_config.json"):
-                import json
-
-                with open(get_file(self.preset, "generation_config.json")) as f:
-                    gen_cfg = json.load(f)
-                task.compile(
-                    sampler=self.converter.convert_sampler_config(gen_cfg)
-                )
         return task
 
     def load_tokenizer(self, cls, config_name="tokenizer.json", **kwargs):
