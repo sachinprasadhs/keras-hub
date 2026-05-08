@@ -986,20 +986,17 @@ def _precompute_assistant_hf_outputs(
 
         print("-> Running HF speculative generation (text) ...")
         hf_generated_text = _speculative_generate(PROMPT_TEXT)
-        print(f"   text: {hf_generated_text!r}")
 
         print("-> Running HF speculative generation (image) ...")
         hf_generated_image = _speculative_generate(
             PROMPT_IMAGE, max_new_tokens=256, raw_image=raw_image
         )
-        print(f"   image: {hf_generated_image!r}")
 
         if is_audio_model and raw_audio is not None:
             print("-> Running HF speculative generation (audio) ...")
             hf_generated_audio = _speculative_generate(
                 PROMPT_AUDIO, raw_audio=raw_audio
             )
-            print(f"   audio: {hf_generated_audio!r}")
 
         raw_video_sub = None
         if is_video_model and raw_video is not None:
@@ -1024,7 +1021,6 @@ def _precompute_assistant_hf_outputs(
             hf_generated_video = _speculative_generate(
                 PROMPT_VIDEO, max_new_tokens=256, raw_video=raw_video_hf
             )
-            print(f"   video: {hf_generated_video!r}")
     elif not skip_generate:
         # Fallback: text-only with bare tokenizer (no processor available).
         print("-> Running HF speculative generation (text only, no processor) ...")
@@ -1227,7 +1223,8 @@ def _verify_assistant_mode(
                 audio=raw_audio,
             )
         if is_video_model and raw_video is not None:
-            raw_video_kh = hf_data.get("raw_video_sub") or raw_video
+            _raw_video_sub = hf_data.get("raw_video_sub")
+            raw_video_kh = _raw_video_sub if _raw_video_sub is not None else raw_video
             video_prompt_len = hf_data.get("video_prompt_len") or 2048
             video_num_frames = hf_data.get("video_num_frames")
             saved_nf = preprocessor.num_frames_per_video
