@@ -884,9 +884,16 @@ def _precompute_assistant_hf_outputs(
         inputs_embeds = torch.cat([last_token_embedding, last_hidden_state_t], dim=-1)
 
     # 3. Run assistant model with inputs_embeds + shared KV states.
+    # Pass position_ids = [[seq_len - 1]] matching candidate_generator.py which
+    # explicitly sets position_ids = [[input_ids.shape[1] - 1]].  Without this
+    # the HF model defaults to position 0 (single-token input), diverging from
+    # the KerasHub cache_update_index = seq_len - 1 used in call_with_cache.
+    seq_len = input_ids.shape[1]
+    position_ids = torch.tensor([[seq_len - 1]], dtype=torch.long)
     with torch.no_grad():
         assistant_out = hf_model(
             inputs_embeds=inputs_embeds,
+            position_ids=position_ids,
             shared_kv_states=shared_kv_states,
         )
     hf_logits = assistant_out.logits.detach().numpy()
