@@ -739,19 +739,17 @@ class Gemma4CausalLM(CausalLM):
             ]
 
         if assistant_model is not None:
-            from keras_hub.src.samplers.greedy_sampler import GreedySampler
             from keras_hub.src.samplers.speculative_sampler import (
                 SpeculativeSampler,
             )
 
-            assistant_sampler = getattr(assistant_model, "sampler", None)
-            base_sampler = (
-                assistant_sampler
-                if assistant_sampler is not None
-                and not isinstance(assistant_sampler, GreedySampler)
-                and assistant_sampler != "greedy"
-                else None
-            )
+            # Always use greedy acceptance for speculative decoding.
+            # The assistant's `sampler` attribute is for standalone generation
+            # only; stochastic rejection sampling with the centroid-limited
+            # assistant vocabulary causes garbage tokens because the residual
+            # distribution assigns non-active token probability back from the
+            # target.  HF's assisted generation also uses greedy acceptance.
+            base_sampler = None
             original_sampler = self.sampler
             self._assistant_model = assistant_model
             self.sampler = SpeculativeSampler(
