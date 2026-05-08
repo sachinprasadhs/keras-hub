@@ -601,6 +601,7 @@ def _test_generate(
     prompt,
     hf_generated_text,
     max_length=2048 + 64,
+    assistant_model=None,
     **media_kwargs,
 ):
     """Run KH .generate() and compare output against HF-generated text.
@@ -610,9 +611,12 @@ def _test_generate(
     should pass a larger value so that generation isn't cut off before any
     response tokens are produced.
     """
+    generate_kwargs = {"max_length": max_length}
+    if assistant_model is not None:
+        generate_kwargs["assistant_model"] = assistant_model
     kh_output = kh_model.generate(
         {"prompts": [prompt], **{k: [v] for k, v in media_kwargs.items()}},
-        max_length=max_length,
+        **generate_kwargs,
     )
     kh_text = kh_output[0] if isinstance(kh_output, list) else kh_output
     if isinstance(kh_text, str):
@@ -938,13 +942,16 @@ def _count_keras_hub_assistant_params(kh_assistant):
     return sum(w.numpy().size for w in unique_weights)
 
 
-def _verify_assistant_mode(kh_assistant, hf_data, hf_tokenizer):
+def _verify_assistant_mode(
+    kh_assistant, hf_data, hf_tokenizer, keras_hub_target_preset=None, skip_generate=False
+):
     """Verify a Gemma4AssistantCausalLM against pre-computed HF outputs.
 
     Checks:
       1. Parameter count match with HF.
       2. Logit numerics on finite positions (atol=1e-3, rtol=1e-3).
-    Generation verification is deferred to post-conversion (CPU is too slow).
+      3. Speculative generation comparison (if keras_hub_target_preset given
+         and skip_generate is False).
     """
     print("\n--- Section 1: Parameter count ---")
     kh_params = _count_keras_hub_assistant_params(kh_assistant)
@@ -1035,10 +1042,41 @@ def _verify_assistant_mode(kh_assistant, hf_data, hf_tokenizer):
     )
     print("✓ Logits within tolerance (atol=1e-3, rtol=1e-3).")
 
-    print(
-        "\n✓ Assistant verification complete. "
-        "(Speculative generation: test post-conversion.)"
-    )
+    print("✓ Logits within tolerance (atol=1e-3, rtol=1e-3).")
+
+    # ── Section 3: Speculative generation comparison ────────────────────────
+    if skip_generate or keras_hub_target_preset is None:
+        print(
+            "\n--- Generation Comparison: SKIPPED "
+            "(--skip_generate or no target preset) ---"
+        )
+    else:
+        print("\n--- Section 3: Speculative generation ---")
+        hf_generated_text = hf_data.get("generated_text") or "(not available)"
+
+        # Load the KH target model and run speculative generation.
+        kh_target = keras_hub.models.Gemma4CausalLM.from_preset(
+            keras_hub_target_preset, dtype="float32"
+        )
+        tokenizer = keras_hub.models.Gemma4Tokenizer.from_preset(
+            keras_hub_target_preset
+        )
+        preprocessor = keras_hub.models.Gemma4CausalLMPreprocessor.from_preset(
+            keras_hub_target_preset
+        )
+        preprocessor.audio_converter = None
+        kh_target.preprocessor = preprocessor
+
+        _test_generate(
+            "assistant-speculative",
+            kh_target,
+            PROMPT_TEXT,
+            hf_generated_text,
+            assistant_model=kh_assistant,
+        )
+        del kh_target
+
+    print("\n✓ Assistant verification complete.")
     return kh_assistant
 
 
@@ -1383,7 +1421,13 @@ def main(_):
             f"hf://{hf_preset}", dtype="float32"
         )
 
-        _verify_assistant_mode(kh_assistant, hf_data_assistant, hf_tokenizer)
+        _verify_assistant_mode(
+            kh_assistant,
+            hf_data_assistant,
+            hf_tokenizer,
+            keras_hub_target_preset=keras_hub_preset,
+            skip_generate=FLAGS.skip_generate,
+        )
 
         del hf_data_assistant
         gc.collect()
