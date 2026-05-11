@@ -243,6 +243,8 @@ class Gemma4AssistantCausalLM(CausalLM):
         target_cache,
         cache_update_index,
         padding_mask=None,
+        target_kv_source_full_idx=None,
+        target_kv_source_local_idx=None,
     ):
         """Single-step forward pass for speculative decoding.
 
@@ -291,12 +293,21 @@ class Gemma4AssistantCausalLM(CausalLM):
         x = self.pre_projection(inputs_embeds)
 
         # Build shared_kv map from the target model's cache.
-        # The target model's last 2 unique-type layers (second-to-last =
-        # local/sliding, last = global/full) are used as K/V sources.
-        # All 4 assistant layers are KV-shared (num_kv_shared_layers=4).
+        # We must use the LAST NON-KV-SHARED target layers, not the last 2
+        # layers.  KV-shared target layers never write to their cache slots
+        # (they reuse K/V from an earlier layer), so those slots contain
+        # zero/garbage.  The caller computes the correct source indices from
+        # `backbone.transformer_layers[i].kv_shared_layer_index` and passes
+        # them in as `target_kv_source_full_idx` / `target_kv_source_local_idx`.
         num_target = ops.shape(target_cache)[1]
-        shared_kv_local = target_cache[:, num_target - 2, ...]
-        shared_kv_global = target_cache[:, num_target - 1, ...]
+        if target_kv_source_full_idx is not None:
+            shared_kv_global = target_cache[:, target_kv_source_full_idx, ...]
+        else:
+            shared_kv_global = target_cache[:, num_target - 1, ...]
+        if target_kv_source_local_idx is not None:
+            shared_kv_local = target_cache[:, target_kv_source_local_idx, ...]
+        else:
+            shared_kv_local = target_cache[:, num_target - 2, ...]
 
         layer_types = self.backbone.layer_types or []
         shared_kv_map = {

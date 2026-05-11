@@ -563,6 +563,27 @@ class Gemma4CausalLM(CausalLM):
         # assistant model is attached via generate().
         _assistant = getattr(self, "_assistant_model", None)
         if _assistant is not None:
+            # Compute the correct KV source layer indices for the assistant.
+            # KV-shared target layers (the last `num_kv_shared_layers`) never
+            # write to their own cache slots — they read from an earlier
+            # non-shared layer.  We must pass the index of the last
+            # non-KV-shared full-attention layer and the last non-KV-shared
+            # sliding-attention layer so the assistant reads valid K/V.
+            _target_kv_src_full_idx = None
+            _target_kv_src_local_idx = None
+            _target_layer_types = self.backbone.layer_types or []
+            for _i, _tl in enumerate(self.backbone.transformer_layers):
+                if not getattr(_tl, "is_kv_shared_layer", False):
+                    _lt = (
+                        _target_layer_types[_i]
+                        if _i < len(_target_layer_types)
+                        else None
+                    )
+                    if _lt == "full_attention":
+                        _target_kv_src_full_idx = _i
+                    else:
+                        _target_kv_src_local_idx = _i
+
             # The draft model borrows the target's KV cache at each step
             # (MTP / KV-sharing).  It does not maintain its own cache.
             # `draft_cache` carries `last_hidden_state` (shape
@@ -620,6 +641,8 @@ class Gemma4CausalLM(CausalLM):
                     last_hidden_state=last_hidden,
                     target_cache=cur_target_cache,
                     cache_update_index=fixed_pos,
+                    target_kv_source_full_idx=_target_kv_src_full_idx,
+                    target_kv_source_local_idx=_target_kv_src_local_idx,
                 )
                 # Apply the same final logit soft-cap as the target model so
                 # that q_probs and p_probs (verify_next) are on the same scale
