@@ -694,7 +694,7 @@ class Gemma4CausalLM(CausalLM):
                 )
                 # Verification is post-prompt; media embeddings are in cache.
                 # Passing them here would cause out-of-bounds errors.
-                logits, _, updated_cache = self.call_with_cache(
+                logits, hidden_states, updated_cache = self.call_with_cache(
                     token_ids=prompt_slice,
                     cache=target_cache,
                     cache_update_index=safe_start,
@@ -707,7 +707,10 @@ class Gemma4CausalLM(CausalLM):
                     audio_mask=audio_mask_slice,
                     cache_update_mask=cache_update_slice,
                 )
-                return logits, updated_cache
+                # Return hidden_states so the speculative sampler can seed the
+                # next draft cycle with the target's actual hidden state at the
+                # accepted position (matches HF's n_last_matches indexing).
+                return logits, hidden_states, updated_cache
 
             # Cycle-start position: the last accepted token position at the
             # start of the first speculative cycle.  Stored in the draft

@@ -187,15 +187,24 @@ class SpeculativeSampler(Sampler):
             q_probs = ops.stack(draft_probs_list, axis=1)
 
             # ── Phase 2: Verify with target model ─────────────────────────
+            verify_hidden_states = None
             if verify_next is not None:
                 # Single parallel forward pass covering positions
                 # [index-1 .. index+k-1] (k+1 positions total).
-                target_logits, updated_cache = verify_next(
+                # verify_next may return (logits, cache) or
+                # (logits, hidden_states, cache) — handle both.
+                _verify_result = verify_next(
                     current_prompt,
                     cache if has_cache else None,
                     index,
                     k,
                 )
+                if len(_verify_result) == 3:
+                    target_logits, verify_hidden_states, updated_cache = (
+                        _verify_result
+                    )
+                else:
+                    target_logits, updated_cache = _verify_result
             else:
                 # Fallback: serial verification (slower).
                 logits_list = []
@@ -415,8 +424,22 @@ class SpeculativeSampler(Sampler):
                 and isinstance(current_draft_cache, tuple)
                 and len(current_draft_cache) == 3
             ):
+                # Seed the next draft cycle with the target's actual hidden
+                # state at the accepted position.  This matches HF's:
+                #   last_hidden = outputs.hidden_states[-1][:, n_last_matches:n_last_matches+1]
+                # verify_hidden_states: (batch, k+1, hidden_dim)
+                # min_accepted indexes the bonus position within the window.
+                if verify_hidden_states is not None:
+                    h_dim = ops.shape(verify_hidden_states)[2]
+                    new_seed_hidden = ops.slice(
+                        verify_hidden_states,
+                        [0, ops.cast(min_accepted, "int32"), 0],
+                        [batch_size, 1, h_dim],
+                    )
+                else:
+                    new_seed_hidden = current_draft_cache[0]
                 current_draft_cache = (
-                    current_draft_cache[0],
+                    new_seed_hidden,
                     current_draft_cache[1],
                     new_index - ops.cast(1, "int32"),
                 )
