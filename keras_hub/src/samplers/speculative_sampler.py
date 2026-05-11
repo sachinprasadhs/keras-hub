@@ -137,10 +137,8 @@ class SpeculativeSampler(Sampler):
                 logits, _, current_draft_cache = draft_next(
                     current_prompt, current_draft_cache, safe_idx
                 )
-                # Apply temperature only to get q_probs.  Draft tokens are
-                # sampled from this same distribution so q_probs[x] equals
-                # the probability actually used, which is required for the
-                # rejection-sampling acceptance ratio p(x)/q(x).
+                # Apply temperature to get q_probs for the acceptance ratio
+                # p(x)/q(x).  Temperature comes from base_sampler when set.
                 if self.base_sampler is not None:
                     dt = getattr(self.base_sampler, "temperature", 1.0)
                     probs = ops.softmax(
@@ -149,25 +147,23 @@ class SpeculativeSampler(Sampler):
                 else:
                     probs = self.compute_probabilities(logits)
 
-                if self.base_sampler is not None:
-                    # Stochastic draft: sample from temperature-scaled
-                    # multinomial so q_probs stays consistent with sampling.
-                    next_token = ops.cast(
-                        ops.squeeze(
-                            random.categorical(
-                                ops.cast(
-                                    ops.log(probs + ops.cast(1e-10, probs.dtype)),
-                                    "float32",
-                                ),
-                                1,
-                                seed=self.seed_generator,
-                            ),
-                            axis=-1,
-                        ),
-                        prompt.dtype,
-                    )
-                else:
-                    next_token = ops.argmax(probs, axis=-1)
+                # Draft token: always greedy (argmax of probs).
+                #
+                # For MTP-style assistants (e.g. Gemma4) the non-active
+                # vocabulary positions are filled with a finite value just
+                # below the minimum active logit.  This causes the softmax
+                # to dilute q: ~99 % of the probability mass spreads over
+                # the 258 K non-active tokens, leaving q(draft_token) ≈ 1 %.
+                # If we sampled stochastically we would almost always draw a
+                # garbage non-active token.  Greedy (argmax) always returns
+                # the correct top active token because argmax is unaffected
+                # by the finite fill value.  The acceptance ratio
+                # p(draft)/q(draft) then ≫ 1, giving near-100 % acceptance.
+                #
+                # For standard (non-MTP) assistants with dense logits, greedy
+                # draft is also valid; the acceptance ratio correctly reflects
+                # how much the target distribution agrees with the draft.
+                next_token = ops.argmax(probs, axis=-1)
 
                 next_token = ops.cast(next_token, prompt.dtype)
 

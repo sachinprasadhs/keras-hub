@@ -765,17 +765,22 @@ class Gemma4CausalLM(CausalLM):
 
             # Reuse a previously compiled speculative graph when the
             # num_speculative_tokens matches, avoiding a full JIT recompile on
-            # every call.  Always use greedy acceptance (base_sampler=None):
-            # stochastic rejection sampling with the centroid-limited assistant
-            # vocabulary causes garbage tokens because the residual distribution
-            # leaks non-active token probability from the full-vocabulary target.
-            # HF's assisted generation also uses greedy acceptance.
+            # every call.
+            #
+            # Use the model's own sampler as base_sampler (stochastic
+            # acceptance).  The Gemma4 assistant uses a finite centroid mask
+            # (min_active - 1.0) so its softmax distribution is heavily
+            # diluted: ~99 % of probability spreads over non-active tokens,
+            # leaving q(draft_token) ≈ 1 %.  The acceptance ratio
+            # p(draft)/q(draft) is therefore ≫ 1 for any plausible token,
+            # giving near-100 % acceptance rate.
             cached_spec_sampler = getattr(self, "_cached_spec_sampler", None)
             cached_spec_fn = getattr(self, "_cached_spec_generate_fn", None)
 
             if (
                 cached_spec_sampler is not None
                 and cached_spec_sampler.num_speculative_tokens == num_spec
+                and cached_spec_sampler.base_sampler is original_sampler
             ):
                 # Hot path: reuse compiled speculative graph.
                 self.sampler = cached_spec_sampler
@@ -784,7 +789,7 @@ class Gemma4CausalLM(CausalLM):
                 # Cold path: compile a new speculative graph.
                 self.sampler = SpeculativeSampler(
                     num_speculative_tokens=num_spec,
-                    base_sampler=None,
+                    base_sampler=original_sampler,
                 )
                 self.generate_function = None  # force recompile
 

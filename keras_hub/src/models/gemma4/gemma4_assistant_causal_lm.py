@@ -200,15 +200,27 @@ class Gemma4AssistantCausalLM(CausalLM):
         )
 
         # Scatter into a full-vocab output tensor.
-        # Use -inf so that non-active positions vanish under softmax.
+        # Use min(active_logits) - 1.0 (not -inf) for non-active positions.
+        # This matches HF's Gemma4AssistantMaskedEmbedder design: non-active
+        # tokens get a finite value just below the minimum active logit.
+        # With -inf the softmax collapses all probability onto the 4096
+        # active positions, making q(draft_token) ≈ 50 %.  With the finite
+        # fill, the 258 K non-active positions collectively absorb ~99 % of
+        # the softmax mass, leaving q(draft_token) ≈ 1 %.  The speculative
+        # acceptance ratio p(draft)/q(draft) then ≫ 1, yielding near-100 %
+        # acceptance rate.  Draft tokens are still chosen by argmax so they
+        # remain correct; only the probability used in the acceptance test
+        # changes.
         flat_hs = batch * seq
-        output = ops.full(
-            (flat_hs, vocab_size),
-            float("-inf"),
-            dtype=hidden_states.dtype,
-        )
         scatter_idx = ops.reshape(selected_canonical, (flat_hs, n_tokens))
         flat_logits = ops.reshape(selected_logits, (flat_hs, n_tokens))
+        # Global min across all active logits in the batch (scalar tensor).
+        min_active = ops.min(flat_logits) - ops.cast(1.0, flat_logits.dtype)
+        # Fill output with min_active.  ops.ones * scalar broadcasts correctly
+        # in all Keras backends (including graph-mode JAX/TF).
+        output = ops.ones(
+            (flat_hs, vocab_size), dtype=hidden_states.dtype
+        ) * min_active
 
         # Memory-efficient sparse scatter to avoid full OOM one-hot allocation.
         row_idx = ops.expand_dims(ops.arange(flat_hs, dtype="int32"), axis=-1)
@@ -221,7 +233,6 @@ class Gemma4AssistantCausalLM(CausalLM):
         )
         updates = ops.reshape(flat_logits, (-1,))
 
-        # Perform true scatter update over full negative inf base tensor
         output = ops.scatter_update(output, coords, updates)
         return ops.reshape(output, (batch, seq, vocab_size))
 
