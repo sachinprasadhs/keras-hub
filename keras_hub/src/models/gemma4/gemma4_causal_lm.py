@@ -581,12 +581,17 @@ class Gemma4CausalLM(CausalLM):
             def draft_next(prompt, draft_state, index):
                 """One draft step: advance the assistant by one token.
 
-                `draft_state` is a tuple `(last_hidden, cur_target_cache)`:
+                `draft_state` is a tuple
+                `(last_hidden, cur_target_cache, fixed_pos)`:
                   - `last_hidden`: target-dimension hidden state from the
                     previous step.
                   - `cur_target_cache`: the target model's KV cache.
+                  - `fixed_pos`: the fixed RoPE/mask position for this cycle,
+                    equal to the last *accepted* token position.  Held
+                    constant across all k draft steps (matching HF's
+                    `position_ids = input_ids.shape[1] - 1` pattern).
                 """
-                last_hidden, cur_target_cache = draft_state
+                last_hidden, cur_target_cache, fixed_pos = draft_state
                 # Extract the last token id at position `index - 1`.
                 batch = ops.shape(prompt)[0]
                 last_token_id = ops.slice(
@@ -614,7 +619,7 @@ class Gemma4CausalLM(CausalLM):
                     last_token_embedding=last_token_embedding,
                     last_hidden_state=last_hidden,
                     target_cache=cur_target_cache,
-                    cache_update_index=index - 1,
+                    cache_update_index=fixed_pos,
                 )
                 # Apply the same final logit soft-cap as the target model so
                 # that q_probs and p_probs (verify_next) are on the same scale
@@ -626,7 +631,7 @@ class Gemma4CausalLM(CausalLM):
                 return (
                     ops.squeeze(logits, axis=1),
                     next_hidden,
-                    (next_hidden, cur_target_cache),
+                    (next_hidden, cur_target_cache, fixed_pos),
                 )
 
             def verify_next(prompt, target_cache, index, k):
@@ -681,7 +686,14 @@ class Gemma4CausalLM(CausalLM):
                 )
                 return logits, updated_cache
 
-            draft_cache = (init_last_hidden, cache)
+            # Cycle-start position: the last accepted token position at the
+            # start of the first speculative cycle.  Stored in the draft
+            # state so that all k draft steps within one cycle share the
+            # same fixed RoPE position, matching HF's MTP contract where
+            # position_ids = input_ids.shape[1] - 1 never advances inside
+            # the draft loop.
+            initial_fixed_pos = ops.cast(index - 1, "int32")
+            draft_cache = (init_last_hidden, cache, initial_fixed_pos)
 
         token_ids = self.sampler(
             next=next,

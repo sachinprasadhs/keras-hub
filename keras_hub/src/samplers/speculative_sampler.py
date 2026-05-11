@@ -223,6 +223,7 @@ class SpeculativeSampler(Sampler):
             # Refresh the target-cache slot inside draft_cache so that
             # draft_next in the next outer iteration conditions on the freshly
             # written K/V entries instead of the initial (stale) cache.
+            # Handles both 2-tuple (legacy) and 3-tuple (fixed-pos MTP) forms.
             if (
                 has_draft_cache
                 and has_cache
@@ -230,6 +231,17 @@ class SpeculativeSampler(Sampler):
                 and len(draft_cache) == 2
             ):
                 current_draft_cache = (current_draft_cache[0], updated_cache)
+            elif (
+                has_draft_cache
+                and has_cache
+                and isinstance(draft_cache, tuple)
+                and len(draft_cache) == 3
+            ):
+                current_draft_cache = (
+                    current_draft_cache[0],
+                    updated_cache,
+                    current_draft_cache[2],  # fixed_pos updated below
+                )
 
             # ── Phase 3: Accept / reject via rejection sampling ───────────
             if self.base_sampler is not None:
@@ -397,6 +409,21 @@ class SpeculativeSampler(Sampler):
                 bonus_idx + ops.cast(1, "int32"),
                 ops.cast(max_length, "int32"),
             )
+
+            # Update the fixed_pos in the 3-tuple draft cache to the new
+            # cycle-start position (new_index - 1), so the next cycle's
+            # draft steps all use the correct last-accepted-token position
+            # as their RoPE/mask anchor (matches HF's fixed position_ids).
+            if (
+                has_draft_cache
+                and isinstance(current_draft_cache, tuple)
+                and len(current_draft_cache) == 3
+            ):
+                current_draft_cache = (
+                    current_draft_cache[0],
+                    current_draft_cache[1],
+                    new_index - ops.cast(1, "int32"),
+                )
 
             return (
                 final_prompt,
