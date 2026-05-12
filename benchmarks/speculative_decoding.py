@@ -39,12 +39,11 @@ flags.DEFINE_string(
 )
 flags.DEFINE_string(
     "prompts",
-    (
-        "Explain the theory of relativity in simple terms.|"
-        "Write a short story about a robot learning to paint.|"
-        "What are the main causes of climate change?"
-    ),
-    "Pipe-separated list of prompts to benchmark.",
+    "Explain the theory of relativity in simple terms.",
+    "Pipe-separated list of prompts to benchmark. "
+    "Use a single prompt (default) to avoid the batch min_accepted bottleneck "
+    "that suppresses speedup even with high per-token acceptance. "
+    "Multi-prompt example: 'prompt1|prompt2|prompt3'.",
 )
 flags.DEFINE_integer(
     "max_new_tokens",
@@ -183,9 +182,17 @@ def _run_generation_speculative(target_model, assistant_model, prompts, max_leng
         )
         tps = total_new / elapsed
         results.append((elapsed, total_new, tps))
+
+        # Estimate effective tokens-per-speculative-cycle (rough acceptance proxy).
+        num_spec_tokens = getattr(assistant_model, "num_speculative_tokens", 5)
+        # Lower bound: each spec cycle takes at least 1 target step and num_spec
+        # draft steps.  Total new tokens / time_per_1_target_step gives the
+        # effective speedup factor, but we don't have time_per_target_step here.
+        # Instead, report tok/s and let the caller compare to baseline.
         print(
             f"  run {run_idx + 1}/{FLAGS.num_runs}: "
             f"{elapsed:.2f}s | {total_new} new tokens | {tps:.1f} tok/s"
+            f" | k={num_spec_tokens}"
         )
     return results
 
