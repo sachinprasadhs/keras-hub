@@ -19,10 +19,7 @@ def convert_backbone_config(transformers_config):
     """Map a Transformers config dict → Gemma4Backbone keyword arguments
     for assistant.
     """
-    # This will be similar to convert_gemma4.py but simplified for the
-    # 4-layer model and adding assistant-specific fields if needed.
-    # For now, we can rely on the existing convert_backbone_config or
-    # implementation of a simplified version here.
+    # Delegate to the target model's backbone config converter.
     config = target_convert_config(transformers_config)
     return config
 

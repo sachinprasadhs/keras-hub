@@ -52,7 +52,8 @@ class SpeculativeSampler(Sampler):
             Draft model single-token forward pass.
         draft_cache: optional draft model cache.
         verify_next: optional callable
-            `(prompt, cache, index, k) → (logits, cache)`.
+            `(prompt, cache, index, k) → (logits, cache)` or
+            `(prompt, cache, index, k) → (logits, hidden_states, cache)`.
             If provided, the target model verifies K+1 positions in a single
             parallel forward pass (strongly recommended for performance).
     """
@@ -117,14 +118,8 @@ class SpeculativeSampler(Sampler):
             current_draft_cache = draft_cache if has_draft_cache else None
 
             # ── Phase 1: Draft K tokens ───────────────────────────────────
-            # We run the draft model K times, each time writing the predicted
-            # token into the running prompt buffer.  Draft logits and token
-            # ids are collected for the acceptance step.
-            #
-            # We represent the evolving draft state as a pair of accumulators
-            # that we update via scan-style tensor ops so the body remains
-            # compatible with ops.while_loop (no Python-level iteration inside
-            # the traced graph).
+            # Run the draft model K times autoregressively. Collect draft
+            # token ids and probabilities for the accept step.
             current_prompt = prompt
             draft_ids_list = []
             draft_probs_list = []
@@ -147,22 +142,8 @@ class SpeculativeSampler(Sampler):
                 else:
                     probs = self.compute_probabilities(logits)
 
-                # Draft token: always greedy (argmax of probs).
-                #
-                # For MTP-style assistants (e.g. Gemma4) the non-active
-                # vocabulary positions are filled with a finite value just
-                # below the minimum active logit.  This causes the softmax
-                # to dilute q: ~99 % of the probability mass spreads over
-                # the 258 K non-active tokens, leaving q(draft_token) ≈ 1 %.
-                # If we sampled stochastically we would almost always draw a
-                # garbage non-active token.  Greedy (argmax) always returns
-                # the correct top active token because argmax is unaffected
-                # by the finite fill value.  The acceptance ratio
-                # p(draft)/q(draft) then ≫ 1, giving near-100 % acceptance.
-                #
-                # For standard (non-MTP) assistants with dense logits, greedy
-                # draft is also valid; the acceptance ratio correctly reflects
-                # how much the target distribution agrees with the draft.
+                # Draft token: always greedy (argmax). This is correct for
+                # both sparse-vocab (MTP) and dense-vocab assistants.
                 next_token = ops.argmax(probs, axis=-1)
 
                 next_token = ops.cast(next_token, prompt.dtype)
@@ -225,10 +206,8 @@ class SpeculativeSampler(Sampler):
             # p_probs: (batch, k, vocab)  — the K verification distributions
             p_probs = target_probs[:, :k, :]
 
-            # Refresh the target-cache slot inside draft_cache so that
-            # draft_next in the next outer iteration conditions on the freshly
-            # written K/V entries instead of the initial (stale) cache.
-            # Handles both 2-tuple (legacy) and 3-tuple (fixed-pos MTP) forms.
+            # Refresh the target cache in draft_cache so the next draft cycle
+            # uses the updated K/V entries. Supports 2-tuple and 3-tuple forms.
             if (
                 has_draft_cache
                 and has_cache
@@ -245,7 +224,7 @@ class SpeculativeSampler(Sampler):
                 current_draft_cache = (
                     current_draft_cache[0],
                     updated_cache,
-                    current_draft_cache[2],  # fixed_pos updated below
+                    current_draft_cache[2],
                 )
 
             # ── Phase 3: Accept / reject via rejection sampling ───────────
@@ -415,20 +394,15 @@ class SpeculativeSampler(Sampler):
                 ops.cast(max_length, "int32"),
             )
 
-            # Update the fixed_pos in the 3-tuple draft cache to the new
-            # cycle-start position (new_index - 1), so the next cycle's
-            # draft steps all use the correct last-accepted-token position
-            # as their RoPE/mask anchor (matches HF's fixed position_ids).
+            # Update fixed_pos to the new cycle-start position (new_index - 1)
+            # so the next cycle's draft steps share the correct RoPE anchor.
             if (
                 has_draft_cache
                 and isinstance(current_draft_cache, tuple)
                 and len(current_draft_cache) == 3
             ):
-                # Seed the next draft cycle with the target's actual hidden
-                # state at the accepted position.  This matches HF's:
-                #   last_hidden = outputs.hidden_states[-1][:, n_last_matches:n_last_matches+1]
-                # verify_hidden_states: (batch, k+1, hidden_dim)
-                # min_accepted indexes the bonus position within the window.
+                # Seed the next draft cycle with the target's hidden state
+                # at the accepted position: verify_hidden_states[:, min_accepted, :].
                 if verify_hidden_states is not None:
                     h_dim = ops.shape(verify_hidden_states)[2]
                     new_seed_hidden = ops.slice(

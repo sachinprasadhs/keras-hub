@@ -119,21 +119,22 @@ class SpeculativeSamplerTest(TestCase):
             sampler(next=dummy_next, prompt=prompt, index=0)
 
     def test_serialization(self):
+        from keras_hub.src.samplers.top_p_sampler import TopPSampler
+
+        base = TopPSampler(p=0.9, temperature=0.8)
         sampler = SpeculativeSampler(
             num_speculative_tokens=7,
-            draft_temperature=0.8,
-            temperature=0.9,
+            base_sampler=base,
             seed=42,
         )
         config = sampler.get_config()
         self.assertEqual(config["num_speculative_tokens"], 7)
-        self.assertEqual(config["draft_temperature"], 0.8)
-        self.assertEqual(config["temperature"], 0.9)
         self.assertEqual(config["seed"], 42)
+        self.assertIsNotNone(config["base_sampler"])
 
         restored = SpeculativeSampler.from_config(config)
         self.assertEqual(restored.num_speculative_tokens, 7)
-        self.assertEqual(restored.draft_temperature, 0.8)
+        self.assertEqual(restored.seed, 42)
 
     def test_output_shape(self):
         target_chars = list("abcdefghijkl")

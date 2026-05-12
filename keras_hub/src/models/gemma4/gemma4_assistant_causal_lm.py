@@ -51,7 +51,7 @@ class Gemma4AssistantCausalLM(CausalLM):
         "gemma4_instruct_2b"
     )
     assistant_lm = keras_hub.models.Gemma4AssistantCausalLM.from_preset(
-        "gemma4_instruct_e2b_assistant"
+        "gemma4_instruct_2b_assistant"
     )
     response = target_lm.generate(
         "What is the capital of France?",
@@ -79,8 +79,6 @@ class Gemma4AssistantCausalLM(CausalLM):
         self.centroid_intermediate_top_k = centroid_intermediate_top_k
         self.use_ordered_embeddings = use_ordered_embeddings
         self.num_speculative_tokens = num_speculative_tokens
-        # Set backbone before super().__init__() so the
-        # parent class finds self._backbone immediately.
         self.backbone = backbone
 
         hidden_size = backbone.hidden_dim
@@ -162,9 +160,9 @@ class Gemma4AssistantCausalLM(CausalLM):
         Returns:
             logits: float tensor `(batch, seq, vocabulary_size)`.
         """
-        vocab_size = self.backbone.token_embedding.input_dim
-        top_k = self.centroid_intermediate_top_k
-        k_per_centroid = self._vocab_size_per_centroid
+        vocab_size = self.backbone.vocabulary_size
+        top_k = self.centroid_intermediate_top_k  # active centroids per step
+        k_per_centroid = self._vocab_size_per_centroid  # vocab_size // num_centroids
 
         # (batch, seq, num_centroids)
         centroid_logits = self.centroids(hidden_states)
@@ -199,25 +197,15 @@ class Gemma4AssistantCausalLM(CausalLM):
             axis=-2,
         )
 
-        # Scatter into a full-vocab output tensor.
-        # Use min(active_logits) - 1.0 (not -inf) for non-active positions.
-        # This matches HF's Gemma4AssistantMaskedEmbedder design: non-active
-        # tokens get a finite value just below the minimum active logit.
-        # With -inf the softmax collapses all probability onto the 4096
-        # active positions, making q(draft_token) ≈ 50 %.  With the finite
-        # fill, the 258 K non-active positions collectively absorb ~99 % of
-        # the softmax mass, leaving q(draft_token) ≈ 1 %.  The speculative
-        # acceptance ratio p(draft)/q(draft) then ≫ 1, yielding near-100 %
-        # acceptance rate.  Draft tokens are still chosen by argmax so they
-        # remain correct; only the probability used in the acceptance test
-        # changes.
+        # Scatter active logits into a full-vocab output tensor.
+        # Non-active positions are filled with min(active_logits) - 1.0 so
+        # that inactive tokens receive a finite value just below the minimum
+        # active logit, preventing probability collapse onto active positions.
         flat_hs = batch * seq
         scatter_idx = ops.reshape(selected_canonical, (flat_hs, n_tokens))
         flat_logits = ops.reshape(selected_logits, (flat_hs, n_tokens))
         # Global min across all active logits in the batch (scalar tensor).
         min_active = ops.min(flat_logits) - ops.cast(1.0, flat_logits.dtype)
-        # Fill output with min_active.  ops.ones * scalar broadcasts correctly
-        # in all Keras backends (including graph-mode JAX/TF).
         output = ops.ones(
             (flat_hs, vocab_size), dtype=hidden_states.dtype
         ) * min_active
@@ -253,17 +241,15 @@ class Gemma4AssistantCausalLM(CausalLM):
         Args:
             last_token_embedding: float tensor
                 `(batch, 1, backbone_hidden_size)`.
-                The target model's embedding of the last accepted token, i.e.
-                ``target_backbone.token_embedding(last_token_id)``.
-                This matches HF's candidate generator which calls
-                ``target_model.get_input_embeddings()(last_token_id)``.
+                The target model's embedding of the last accepted token.
             last_hidden_state: float tensor
                 `(batch, 1, backbone_hidden_size)`. Target model's last
                 position hidden state.
             target_cache: float tensor
                 `(batch, num_target_layers, 2, max_len, num_heads, head_dim)`.
-                The target model's full KV cache. The last 2 layers' K/V slices
-                are injected into the assistant's KV-shared layers.
+                The target model's full KV cache. The last non-KV-shared
+                full/sliding attention layers' K/V slices are injected into
+                the assistant's KV-shared layers.
             cache_update_index: int or int tensor. The current decode position.
             padding_mask: optional int tensor `(batch, seq_len)`.
 
@@ -272,33 +258,18 @@ class Gemma4AssistantCausalLM(CausalLM):
             `(batch, 1, vocabulary_size)` and `next_hidden_state` has shape
             `(batch, 1, backbone_hidden_size)`.
         """
-        # Concatenate [target_embed(last_id), last_hidden_state]:
+        # Concatenate target token embedding and target hidden state:
         # (batch, 1, 2 * backbone_hidden_size).
-        # `last_token_embedding` comes from the TARGET model's embedding table
-        # (backbone_hidden_size-dim), matching HF's candidate generator:
-        #   last_token_embedding =
-        #       target_model.get_input_embeddings()(last_token_id)
-        #   inputs_embeds = cat([last_token_embedding, last_hidden_state],
-        #       dim=-1)
         inputs_embeds = ops.concatenate(
             [last_token_embedding, last_hidden_state], axis=-1
         )
 
-        # Project to assistant hidden_size.
-        # Note: last_token_embedding already carries the target model's
-        # embedding scale (sqrt(target_hidden_dim)), applied by the caller
-        # before this method.  No additional scale is applied here —
-        # HF's Gemma4AssistantForCausalLM.forward() also does not apply
-        # any extra scale after pre_projection.
         x = self.pre_projection(inputs_embeds)
 
-        # Build shared_kv map from the target model's cache.
-        # We must use the LAST NON-KV-SHARED target layers, not the last 2
-        # layers.  KV-shared target layers never write to their cache slots
-        # (they reuse K/V from an earlier layer), so those slots contain
-        # zero/garbage.  The caller computes the correct source indices from
-        # `backbone.transformer_layers[i].kv_shared_layer_index` and passes
-        # them in as `target_kv_source_full_idx` / `target_kv_source_local_idx`.
+        # Build a shared KV map from the target model's KV cache.
+        # `target_kv_source_full_idx` / `target_kv_source_local_idx` point to
+        # the last non-KV-shared full/sliding attention layers in the target,
+        # which are the correct source for shared K/V.
         num_target = ops.shape(target_cache)[1]
         if target_kv_source_full_idx is not None:
             shared_kv_global = target_cache[:, target_kv_source_full_idx, ...]
